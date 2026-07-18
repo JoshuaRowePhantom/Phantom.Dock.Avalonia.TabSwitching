@@ -2,13 +2,65 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         x:Class="Phantom.Dock.Avalonia.TabSwitching.DockTabSwitchTheme">
   <!--
-    Placeholder default theme dictionary for the Dock Tab-Switching API.
+    Default theme dictionary for the Dock Tab-Switching API.
 
-    Later commits in the #1073 epic populate this with:
-      * the default animated index-badge ControlTheme (the replaceable IndexTheme fallback), and
-      * the DocumentTabStripItem composition ControlTheme (Strategy A, design section 4.4).
-
-    It ships empty for now so consumers can already merge <ts:DockTabSwitchTheme /> into their
-    Application.Styles without failing.
+    Ships the default, replaceable index-badge ControlTheme (the DockTabSwitch.IndexTheme fallback,
+    design §4.3). The default:
+      * is hidden until the activation modifier is held (badges fade in via the alt-held class), and
+      * overlaps multiple labels in a single cell sized to the widest label (a plain Panel items host
+        naturally overlaps its children and measures to their union), so a tab numbered by several
+        gesture sets reserves no extra horizontal space.
   -->
+  <Styles.Resources>
+    <ControlTheme x:Key="DockTabSwitchDefaultIndexTheme" TargetType="ContentPresenter">
+      <Setter Property="HorizontalAlignment" Value="Right" />
+      <Setter Property="VerticalAlignment" Value="Top" />
+      <Setter Property="ContentTemplate">
+        <DataTemplate x:CompileBindings="False">
+          <!-- DataContext is the DockTabIndexContext. A plain Panel host overlaps every label in one
+               cell and measures to the widest (size-to-largest); no per-label horizontal padding. -->
+          <ItemsControl ItemsSource="{Binding Labels}"
+                        HorizontalAlignment="Right"
+                        VerticalAlignment="Top">
+            <ItemsControl.ItemsPanel>
+              <ItemsPanelTemplate>
+                <Panel />
+              </ItemsPanelTemplate>
+            </ItemsControl.ItemsPanel>
+            <ItemsControl.ItemTemplate>
+              <DataTemplate x:CompileBindings="False">
+                <!-- Hidden by default (Opacity 0); fades in only while the activation modifier is
+                     held, driven by the context's IsVisible -> alt-held class. -->
+                <Border Classes="alt-index-badge"
+                        Classes.alt-held="{Binding $parent[ItemsControl].DataContext.IsVisible}">
+                  <TextBlock Text="{Binding Text}"
+                             FontSize="10"
+                             HorizontalAlignment="Center"
+                             VerticalAlignment="Center" />
+                </Border>
+              </DataTemplate>
+            </ItemsControl.ItemTemplate>
+          </ItemsControl>
+        </DataTemplate>
+      </Setter>
+    </ControlTheme>
+  </Styles.Resources>
+
+  <!-- Badge visual + fade animation, lifted from the product's existing animated Alt+N badge. -->
+  <Style Selector="Border.alt-index-badge">
+    <Setter Property="Background" Value="{DynamicResource SystemAccentColor}" />
+    <Setter Property="CornerRadius" Value="4" />
+    <Setter Property="Padding" Value="3,1" />
+    <Setter Property="Margin" Value="0,-2,-2,0" />
+    <Setter Property="Opacity" Value="0" />
+    <Setter Property="ZIndex" Value="10" />
+    <Setter Property="Transitions">
+      <Transitions>
+        <DoubleTransition Property="Opacity" Duration="0:0:0.1" Easing="LinearEasing" />
+      </Transitions>
+    </Setter>
+  </Style>
+  <Style Selector="Border.alt-index-badge.alt-held">
+    <Setter Property="Opacity" Value="1" />
+  </Style>
 </Styles>

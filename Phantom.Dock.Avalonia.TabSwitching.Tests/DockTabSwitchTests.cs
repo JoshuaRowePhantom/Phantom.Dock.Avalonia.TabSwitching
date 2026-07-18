@@ -102,4 +102,27 @@ public sealed class DockTabSwitchTests
         DockTabSwitch.SetIsSwitchable(descendant, true);
         Assert.True(DockTabSwitch.GetIsSwitchable(descendant));
     }
+
+    [AvaloniaFact]
+    public void IndexTheme_Unset_FallsBackToDefault()
+    {
+        var control = new Border();
+
+        // With no IndexTheme set, the effective theme resolves to the packaged default.
+        Assert.Null(DockTabSwitch.GetIndexTheme(control));
+        Assert.Same(DockTabSwitchTheme.DefaultIndexTheme, DockTabSwitch.GetEffectiveIndexTheme(control));
+    }
+
+    [AvaloniaFact]
+    public void IndexTheme_SetOnStrip_OverridesInheritedDefault()
+    {
+        var custom = new global::Avalonia.Styling.ControlTheme(typeof(global::Avalonia.Controls.Presenters.ContentPresenter));
+        var strip = new Border();
+
+        DockTabSwitch.SetIndexTheme(strip, custom);
+
+        // A per-strip IndexTheme wins over the inherited default fallback.
+        Assert.Same(custom, DockTabSwitch.GetEffectiveIndexTheme(strip));
+        Assert.NotSame(DockTabSwitchTheme.DefaultIndexTheme, DockTabSwitch.GetEffectiveIndexTheme(strip));
+    }
 }

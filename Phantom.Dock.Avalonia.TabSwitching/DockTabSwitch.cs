@@ -74,6 +74,15 @@ public static class DockTabSwitch
 
     public static ControlTheme? GetIndexTheme(Control control) => control.GetValue(IndexThemeProperty);
 
+    /// <summary>
+    /// Resolves the effective index-badge <see cref="ControlTheme"/> for <paramref name="control"/>:
+    /// the value of <see cref="IndexThemeProperty"/> if set (locally or inherited), otherwise the
+    /// packaged default theme. This is the fallback the badge presenter uses, resolved here because an
+    /// attached-property <c>defaultValue</c> cannot reference a resource directly (design §4.3).
+    /// </summary>
+    public static ControlTheme GetEffectiveIndexTheme(Control control) =>
+        GetIndexTheme(control) ?? DockTabSwitchTheme.DefaultIndexTheme;
+
     /// <summary>The controller installed on <paramref name="control"/>, or <c>null</c> if not enabled.</summary>
     public static DockTabSwitchController? GetController(Control control) =>
         control.GetValue(ControllerProperty);
