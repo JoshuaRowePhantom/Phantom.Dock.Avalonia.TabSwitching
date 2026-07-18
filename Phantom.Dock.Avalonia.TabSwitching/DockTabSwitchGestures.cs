@@ -49,4 +49,96 @@ public sealed class DockTabSwitchGestures
 
     /// <summary>Optional explicit override: an ordered list wins over <see cref="Modifiers"/>/<see cref="Keys"/>.</summary>
     public IList<KeyGesture>? Gestures { get; set; }
+
+    /// <summary>
+    /// The digit keys, in the order they map to indices <c>0..9</c>: <c>D1→0 … D9→8, D0→9</c>
+    /// (so "0" is the tenth tab, matching the legacy <c>GetDigitIndex</c>/<c>AltShortcutLabelForIndex</c>
+    /// behavior).
+    /// </summary>
+    private static readonly Key[] DigitKeys =
+    {
+        Key.D1, Key.D2, Key.D3, Key.D4, Key.D5, Key.D6, Key.D7, Key.D8, Key.D9, Key.D0,
+    };
+
+    /// <summary>The function keys, in the order they map to indices: <c>F1→0 … F12→11</c>.</summary>
+    private static readonly Key[] FunctionKeys =
+    {
+        Key.F1, Key.F2, Key.F3, Key.F4, Key.F5, Key.F6,
+        Key.F7, Key.F8, Key.F9, Key.F10, Key.F11, Key.F12,
+    };
+
+    /// <summary>
+    /// Builds the ordered gesture → index map for this gesture set (design §4.1). The index of a
+    /// gesture is its position in the returned list. An explicit <see cref="Gestures"/> list wins over
+    /// <see cref="Modifiers"/>/<see cref="Keys"/>; otherwise digits (<c>D1..D9, D0</c>) occupy the
+    /// leading indices and, if <see cref="DockTabSwitchKeys.FunctionKeys"/> is also set, function keys
+    /// (<c>F1..F12</c>) continue after them in a deterministic order.
+    /// </summary>
+    public DockTabSwitchGestureMap BuildMap()
+    {
+        // An explicit list overrides everything; index = position in the list.
+        if (Gestures is { Count: > 0 })
+        {
+            return new DockTabSwitchGestureMap(new List<KeyGesture>(Gestures));
+        }
+
+        var gestures = new List<KeyGesture>();
+
+        if (Keys.HasFlag(DockTabSwitchKeys.Digits))
+        {
+            foreach (var key in DigitKeys)
+            {
+                gestures.Add(new KeyGesture(key, Modifiers));
+            }
+        }
+
+        if (Keys.HasFlag(DockTabSwitchKeys.FunctionKeys))
+        {
+            foreach (var key in FunctionKeys)
+            {
+                gestures.Add(new KeyGesture(key, Modifiers));
+            }
+        }
+
+        return new DockTabSwitchGestureMap(gestures);
+    }
+}
+
+/// <summary>
+/// The ordered gesture → index map produced by <see cref="DockTabSwitchGestures.BuildMap"/>. The index
+/// of a gesture is its position in <see cref="Gestures"/>. Matching is modifier-exact via
+/// <see cref="KeyGesture.Matches(KeyEventArgs)"/>, so an <c>Alt</c>-only set does not fire on
+/// <c>Alt+Shift</c>.
+/// </summary>
+public sealed class DockTabSwitchGestureMap
+{
+    internal DockTabSwitchGestureMap(IReadOnlyList<KeyGesture> gestures)
+    {
+        Gestures = gestures;
+    }
+
+    /// <summary>The ordered gestures; a gesture's index is its position in this list.</summary>
+    public IReadOnlyList<KeyGesture> Gestures { get; }
+
+    /// <summary>The number of mapped gestures.</summary>
+    public int Count => Gestures.Count;
+
+    /// <summary>
+    /// Returns the zero-based index of the first gesture that exactly matches <paramref name="e"/>, or
+    /// <c>-1</c> if none match. Modifier matching is exact.
+    /// </summary>
+    public bool TryGetIndex(KeyEventArgs e, out int index)
+    {
+        for (var i = 0; i < Gestures.Count; i++)
+        {
+            if (Gestures[i].Matches(e))
+            {
+                index = i;
+                return true;
+            }
+        }
+
+        index = -1;
+        return false;
+    }
 }
