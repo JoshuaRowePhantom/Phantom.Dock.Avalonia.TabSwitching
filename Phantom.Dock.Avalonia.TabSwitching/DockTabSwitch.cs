@@ -44,6 +44,27 @@ public static class DockTabSwitch
             "IndexTheme", typeof(DockTabSwitch), inherits: true);
 
     /// <summary>
+    /// The controller-owned <see cref="DockTabIndexContext"/> attached to each realized tab-header
+    /// container (a <c>DocumentTabStripItem</c>), which the injected index badge binds to (design §4.4).
+    /// Set by the controller on <c>ContainerPrepared</c> and cleared on <c>ContainerClearing</c> so a
+    /// recycled container never shows a stale number. Not inherited — it is per-container data.
+    /// </summary>
+    public static readonly AttachedProperty<DockTabIndexContext?> IndexContextProperty =
+        AvaloniaProperty.RegisterAttached<Control, DockTabIndexContext?>("IndexContext", typeof(DockTabSwitch));
+
+    /// <summary>
+    /// The header-composition strategy (design §4.4). <see cref="DockTabSwitchComposition.ContentPresenter"/>
+    /// (default) composes a sibling badge presenter into the tab-header host (Strategy A);
+    /// <see cref="DockTabSwitchComposition.Adorner"/> overlays the badge via the adorner layer with no
+    /// container-theme override (Strategy B). Inherited so a value on the <c>DockControl</c> cascades to
+    /// every strip.
+    /// </summary>
+    public static readonly AttachedProperty<DockTabSwitchComposition> CompositionProperty =
+        AvaloniaProperty.RegisterAttached<Control, DockTabSwitchComposition>(
+            "Composition", typeof(DockTabSwitch),
+            defaultValue: DockTabSwitchComposition.ContentPresenter, inherits: true);
+
+    /// <summary>
     /// Private storage for the controller instance on the host, so <see cref="EnabledProperty"/>
     /// toggles are idempotent (never double-attach or leak).
     /// </summary>
@@ -73,6 +94,18 @@ public static class DockTabSwitch
         control.SetValue(IndexThemeProperty, value);
 
     public static ControlTheme? GetIndexTheme(Control control) => control.GetValue(IndexThemeProperty);
+
+    public static void SetIndexContext(Control control, DockTabIndexContext? value) =>
+        control.SetValue(IndexContextProperty, value);
+
+    public static DockTabIndexContext? GetIndexContext(Control control) =>
+        control.GetValue(IndexContextProperty);
+
+    public static void SetComposition(Control control, DockTabSwitchComposition value) =>
+        control.SetValue(CompositionProperty, value);
+
+    public static DockTabSwitchComposition GetComposition(Control control) =>
+        control.GetValue(CompositionProperty);
 
     /// <summary>
     /// Resolves the effective index-badge <see cref="ControlTheme"/> for <paramref name="control"/>:
