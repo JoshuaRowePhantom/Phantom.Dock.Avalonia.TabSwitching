@@ -1,0 +1,14 @@
+<Styles xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        x:Class="Phantom.Dock.Avalonia.TabSwitching.DockTabSwitchTheme">
+  <!--
+    Placeholder default theme dictionary for the Dock Tab-Switching API.
+
+    Later commits in the #1073 epic populate this with:
+      * the default animated index-badge ControlTheme (the replaceable IndexTheme fallback), and
+      * the DocumentTabStripItem composition ControlTheme (Strategy A, design section 4.4).
+
+    It ships empty for now so consumers can already merge <ts:DockTabSwitchTheme /> into their
+    Application.Styles without failing.
+  -->
+</Styles>
