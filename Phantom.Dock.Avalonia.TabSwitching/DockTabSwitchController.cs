@@ -1,7 +1,10 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
+using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Interactivity;
+using Avalonia.VisualTree;
 using Dock.Avalonia.Controls;
 using Dock.Model.Core;
 
@@ -17,12 +20,15 @@ namespace Phantom.Dock.Avalonia.TabSwitching;
 /// tunnel <c>KeyDown</c>/<c>KeyUp</c> handler on the <see cref="DockControl"/> (mirroring Dock's own
 /// selector), matches each configured <see cref="DockTabSwitchGestures"/> set, resolves the indexed
 /// dockable and activates it through Dock's factory, and tracks the bare activation modifier to drive
-/// <see cref="AreBadgesVisible"/>. The shared, scope-aware <c>DockTabOrder</c> service arrives in a
-/// later commit of the #1073 epic; here a single default scope root (the whole layout) is used.
+/// <see cref="AreBadgesVisible"/>. Ordering is derived from the shared, scope-aware
+/// <see cref="DockTabOrder"/> service (design §4.2/§4.5): each binding resolves its own scope root via
+/// <see cref="DockTabScopeResolver"/> and the inherited <c>IsSwitchable</c> opt-out filters strips.
 /// </remarks>
 public sealed class DockTabSwitchController : IDisposable
 {
     private static readonly DockTabSwitchGestures[] DefaultBindings = { new() };
+
+    private readonly DockTabOrder _order = new();
 
     private bool _attached;
     private bool _disposed;
@@ -137,53 +143,43 @@ public sealed class DockTabSwitchController : IDisposable
             return false;
         }
 
-        var (strip, dockable) = order[index];
-        var factory = dockable.Factory;
-        factory?.SetActiveDockable(dockable);
-        factory?.SetFocusedDockable(strip, dockable);
+        var entry = order[index];
+        var factory = entry.Dockable.Factory;
+        factory?.SetActiveDockable(entry.Dockable);
+        factory?.SetFocusedDockable(entry.Strip, entry.Dockable);
         return true;
     }
 
     /// <summary>
-    /// Computes the ordered <c>(strip, dockable)</c> activation list from a single default scope root —
-    /// the whole layout — by walking <see cref="IDock.VisibleDockables"/> in visual order and collecting
-    /// each leaf dockable together with its owning strip. The shared, scope-aware <c>DockTabOrder</c>
-    /// service (which honours each binding's <c>Scope</c> and the inherited <c>IsSwitchable</c> opt-out)
-    /// replaces this in a later commit of the #1073 epic.
+    /// Computes the ordered <c>(strip, dockable)</c> activation list for <paramref name="binding"/> from
+    /// the shared <see cref="DockTabOrder"/> service (design §4.2/§4.5). The binding's own
+    /// <see cref="DockTabSwitchGestures.Scope"/> resolves the ordering root
+    /// (<see cref="DockTabScopeResolver.ResolveScopeRoot"/>), and the inherited <c>IsSwitchable</c>
+    /// opt-out filters strips (<see cref="IsStripSwitchable"/>). The same service instance feeds label
+    /// display, so activation and badges can never resolve a different dockable for an index.
     /// </summary>
-    private IReadOnlyList<(IDock Strip, IDockable Dockable)> ComputeOrder(DockTabSwitchGestures binding)
+    internal IReadOnlyList<DockTabEntry> ComputeOrder(DockTabSwitchGestures binding)
     {
-        _ = binding;
-        var result = new List<(IDock, IDockable)>();
-        if (DockControl.Layout is { } root)
-        {
-            Collect(root, result);
-        }
-
-        return result;
+        var scopeRoot = DockTabScopeResolver.ResolveScopeRoot(DockControl.Layout, binding.Scope);
+        return _order.Compute(scopeRoot, IsStripSwitchable);
     }
 
-    private static void Collect(IDock dock, List<(IDock, IDockable)> acc)
+    /// <summary>
+    /// The inherited <c>IsSwitchable</c> opt-out (§4.2), resolved against the realized
+    /// <see cref="DocumentTabStrip"/> control for <paramref name="strip"/> so a value on the strip (or
+    /// any ancestor) cascades. A strip with no realized control (e.g. before layout) defaults to
+    /// switchable.
+    /// </summary>
+    private bool IsStripSwitchable(IDock strip)
     {
-        var visible = dock.VisibleDockables;
-        if (visible is null)
-        {
-            return;
-        }
-
-        foreach (var dockable in visible)
-        {
-            switch (dockable)
-            {
-                case IDock childDock:
-                    Collect(childDock, acc);
-                    break;
-                case not null:
-                    acc.Add((dock, dockable));
-                    break;
-            }
-        }
+        var control = FindStripControl(strip);
+        return control is null || DockTabSwitch.GetIsSwitchable(control);
     }
+
+    private Control? FindStripControl(IDock strip) =>
+        DockControl.GetVisualDescendants()
+            .OfType<DocumentTabStrip>()
+            .FirstOrDefault(ts => ReferenceEquals(ts.DataContext, strip));
 
     private IReadOnlyList<DockTabSwitchGestures> GetEffectiveBindings()
     {
