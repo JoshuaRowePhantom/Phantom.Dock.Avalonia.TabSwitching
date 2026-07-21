@@ -75,7 +75,52 @@ public sealed class DockTabSwitchController : IDisposable
         _attached = true;
 
         _rootPipeline = AttachPipeline(DockControl);
+        // Reclaim ownership: if any other controller had auto-attached to this controller's root
+        // DockControl (order-of-creation race, e.g. a host controller attached before the nested
+        // content DockControl's own controller existed), tell it to release the pipeline so our
+        // own root-pipeline is the sole tunnel handler here (design §8.6 / #1081).
+        StealRootFromOtherControllers();
         SubscribeToRegistry();
+    }
+
+    private void StealRootFromOtherControllers()
+    {
+        if (Factory?.DockControls is not { } controls)
+        {
+            return;
+        }
+
+        foreach (var dc in controls.OfType<DockControl>())
+        {
+            if (ReferenceEquals(dc, DockControl))
+            {
+                continue;
+            }
+
+            var other = DockTabSwitch.GetController(dc);
+            if (other is not null && !ReferenceEquals(other, this))
+            {
+                other.DetachAutoWirePipelineFor(DockControl);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Detaches any auto-wire pipeline this controller may hold for <paramref name="dockControl"/>,
+    /// which is <b>not</b> this controller's own root <see cref="DockControl"/>. Called by another
+    /// controller taking over ownership of <paramref name="dockControl"/> (design §8.6 / #1081).
+    /// </summary>
+    internal void DetachAutoWirePipelineFor(DockControl dockControl)
+    {
+        if (ReferenceEquals(dockControl, DockControl))
+        {
+            return;
+        }
+
+        if (_pipelines.Remove(dockControl, out var pipeline))
+        {
+            pipeline.Detach();
+        }
     }
 
     /// <summary>
@@ -184,6 +229,21 @@ public sealed class DockTabSwitchController : IDisposable
             return existing;
         }
 
+        // Window-scoped auto-wire (design §8.6 / #1081): don't cross-bind a DockControl that
+        // already carries its own controller (e.g., a nested content DockControl configured with
+        // its own gesture set). Each controller manages the DockControls it owns; sibling
+        // controls sharing the same factory but wired to a different controller are left alone.
+        // Only the controller root and DockControls without their own controller (typically
+        // Dock's floating HostWindow inner controls) get an auto-attached pipeline.
+        if (!ReferenceEquals(dockControl, DockControl))
+        {
+            var otherController = DockTabSwitch.GetController(dockControl);
+            if (otherController is not null && !ReferenceEquals(otherController, this))
+            {
+                return null!;
+            }
+        }
+
         var pipeline = new Pipeline(this, dockControl);
         _pipelines[dockControl] = pipeline;
         pipeline.Attach();
@@ -230,13 +290,39 @@ public sealed class DockTabSwitchController : IDisposable
     // --- Shared state used by every pipeline -----------------------------------------------------
 
     /// <summary>
-    /// The effective gesture-set bindings for the whole controller, resolved from the <b>root</b>
-    /// <see cref="DockControl"/> so floating windows use the same configuration.
+    /// The effective gesture-set bindings for the controller root — the fallback for pipelines
+    /// whose own <c>DockControl</c> has no <see cref="DockTabSwitch.BindingsProperty"/> set. See
+    /// <see cref="GetEffectiveBindings(DockControl)"/> for the per-<c>DockControl</c> resolution
+    /// (design §8.6, own control first, root as fallback).
     /// </summary>
-    internal IReadOnlyList<DockTabSwitchGestures> GetEffectiveBindings()
+    internal IReadOnlyList<DockTabSwitchGestures> GetEffectiveBindings() =>
+        GetEffectiveBindings(DockControl);
+
+    /// <summary>
+    /// The effective gesture-set bindings for <paramref name="dockControl"/>. Resolution order:
+    /// (1) <see cref="DockTabSwitch.GetBindings"/> on <paramref name="dockControl"/> itself, then
+    /// (2) the same property on the controller root (so floating windows without an explicit
+    /// configuration inherit the root's), then (3) the packaged default. This lets host and
+    /// nested content <c>DockControl</c>s sharing one factory carry independent gesture sets.
+    /// </summary>
+    internal IReadOnlyList<DockTabSwitchGestures> GetEffectiveBindings(DockControl dockControl)
     {
-        var bindings = DockTabSwitch.GetBindings(DockControl);
-        return bindings is { Count: > 0 } ? bindings : DefaultBindings;
+        var own = DockTabSwitch.GetBindings(dockControl);
+        if (own is { Count: > 0 })
+        {
+            return own;
+        }
+
+        if (!ReferenceEquals(dockControl, DockControl))
+        {
+            var root = DockTabSwitch.GetBindings(DockControl);
+            if (root is { Count: > 0 })
+            {
+                return root;
+            }
+        }
+
+        return DefaultBindings;
     }
 
     internal void UpdateModifierState(Key key, bool pressed)
@@ -261,13 +347,23 @@ public sealed class DockTabSwitchController : IDisposable
 
     private void RefreshBadgeVisibility()
     {
+        // Badges are visible if any pipeline's own effective gesture set matches the currently
+        // held modifiers (each pipeline may resolve a different set from its own DockControl).
         var visible = false;
-        foreach (var binding in GetEffectiveBindings())
+        foreach (var pipeline in _pipelines.Values)
         {
-            var required = binding.Modifiers;
-            if (required != KeyModifiers.None && (_heldModifiers & required) == required)
+            foreach (var binding in GetEffectiveBindings(pipeline.DockControl))
             {
-                visible = true;
+                var required = binding.Modifiers;
+                if (required != KeyModifiers.None && (_heldModifiers & required) == required)
+                {
+                    visible = true;
+                    break;
+                }
+            }
+
+            if (visible)
+            {
                 break;
             }
         }
@@ -312,6 +408,9 @@ public sealed class DockTabSwitchController : IDisposable
             _owner = owner;
             _dockControl = dockControl;
         }
+
+        /// <summary>The <see cref="DockControl"/> this pipeline is attached to.</summary>
+        public DockControl DockControl => _dockControl;
 
         public void Attach()
         {
@@ -500,7 +599,7 @@ public sealed class DockTabSwitchController : IDisposable
 
             if (container.DataContext is IDockable dockable)
             {
-                foreach (var binding in _owner.GetEffectiveBindings())
+                foreach (var binding in _owner.GetEffectiveBindings(_dockControl))
                 {
                     var order = ComputeOrder(binding);
                     var index = IndexOf(order, dockable);
@@ -542,7 +641,7 @@ public sealed class DockTabSwitchController : IDisposable
         {
             _owner.UpdateModifierState(e.Key, pressed: true);
 
-            foreach (var binding in _owner.GetEffectiveBindings())
+            foreach (var binding in _owner.GetEffectiveBindings(_dockControl))
             {
                 var map = binding.BuildMap();
                 if (map.TryGetIndex(e, out var index))

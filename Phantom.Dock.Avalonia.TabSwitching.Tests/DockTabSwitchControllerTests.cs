@@ -4,8 +4,8 @@ using Avalonia.Input;
 using Avalonia.Interactivity;
 using Dock.Avalonia.Controls;
 using Dock.Model.Core;
-using DockDocument = Dock.Model.Avalonia.Controls.Document;
-using DockDocumentDock = Dock.Model.Avalonia.Controls.DocumentDock;
+using DockDocument = global::Dock.Model.Avalonia.Controls.Document;
+using DockDocumentDock = global::Dock.Model.Avalonia.Controls.DocumentDock;
 using DockRootDock = Dock.Model.Avalonia.Controls.RootDock;
 using Xunit;
 
@@ -186,5 +186,270 @@ public sealed class DockTabSwitchControllerTests
         controller.ProcessKeyDown(args);
         Assert.True(args.Handled);
         Assert.Same(documents[1], factory.LastActive);
+    }
+
+    // --- #1081: per-DockControl binding resolution + window-scoped auto-wire ---------------------
+
+    private sealed record HostContentFixture(
+        DockControl Host,
+        DockControl Content,
+        DockTabSwitchController HostController,
+        DockTabSwitchController ContentController,
+        global::Dock.Model.Avalonia.Controls.Document[] HostDocs,
+        global::Dock.Model.Avalonia.Controls.Document[] ContentDocs,
+        IDock HostStrip,
+        IDock ContentStrip,
+        RecordingFactory Factory);
+
+    /// <summary>
+    /// Builds the product's two-separate-DockControl topology (Option A): a shared factory owns
+    /// both an outer host <see cref="DockControl"/> (numbered with <c>Alt+Shift+N</c>) and a nested
+    /// content <see cref="DockControl"/> (numbered with <c>Alt+N</c>). Both register themselves
+    /// in the factory's <c>DockControls</c> collection, so the controller registry auto-wire
+    /// must not cross-bind them (window-scoped auto-wire).
+    /// </summary>
+    private static HostContentFixture BuildHostAndContent(int hostDocs, int contentDocs)
+    {
+        var factory = new RecordingFactory();
+
+        var hostDocuments = new global::Dock.Model.Avalonia.Controls.Document[hostDocs];
+        var hostStrip = new DockDocumentDock();
+        var hostVisible = new AvaloniaList<IDockable>();
+        for (var i = 0; i < hostDocs; i++)
+        {
+            var d = new global::Dock.Model.Avalonia.Controls.Document { Id = "h" + i, Title = "h" + i, Owner = hostStrip, Factory = factory };
+            hostDocuments[i] = d;
+            hostVisible.Add(d);
+        }
+        hostStrip.VisibleDockables = hostVisible;
+        var hostRoot = new DockRootDock { Factory = factory, VisibleDockables = new AvaloniaList<IDockable> { hostStrip } };
+        hostStrip.Owner = hostRoot;
+        var host = new DockControl { Factory = factory, Layout = hostRoot };
+
+        var contentDocuments = new global::Dock.Model.Avalonia.Controls.Document[contentDocs];
+        var contentStrip = new DockDocumentDock();
+        var contentVisible = new AvaloniaList<IDockable>();
+        for (var i = 0; i < contentDocs; i++)
+        {
+            var d = new global::Dock.Model.Avalonia.Controls.Document { Id = "c" + i, Title = "c" + i, Owner = contentStrip, Factory = factory };
+            contentDocuments[i] = d;
+            contentVisible.Add(d);
+        }
+        contentStrip.VisibleDockables = contentVisible;
+        var contentRoot = new DockRootDock { Factory = factory, VisibleDockables = new AvaloniaList<IDockable> { contentStrip } };
+        contentStrip.Owner = contentRoot;
+        var content = new DockControl { Factory = factory, Layout = contentRoot };
+
+        // Independent gesture sets: host = Alt+Shift+Digits, content = Alt+Digits.
+        DockTabSwitch.SetBindings(host, new DockTabSwitchBindings
+        {
+            new DockTabSwitchGestures { Modifiers = KeyModifiers.Alt | KeyModifiers.Shift, Keys = DockTabSwitchKeys.Digits },
+        });
+        DockTabSwitch.SetBindings(content, new DockTabSwitchBindings
+        {
+            new DockTabSwitchGestures { Modifiers = KeyModifiers.Alt, Keys = DockTabSwitchKeys.Digits },
+        });
+
+        DockTabSwitch.SetEnabled(host, true);
+        DockTabSwitch.SetEnabled(content, true);
+
+        return new HostContentFixture(
+            host, content,
+            DockTabSwitch.GetController(host)!, DockTabSwitch.GetController(content)!,
+            hostDocuments, contentDocuments,
+            hostStrip, contentStrip,
+            factory);
+    }
+
+    [AvaloniaFact]
+    public void Pipeline_ResolvesBindingsFromOwnDockControl()
+    {
+        // Host carries Alt+Shift+N; content carries Alt+N. Both bindings live on their own DockControl.
+        // Each controller's own root pipeline must resolve the gesture set attached to its own control,
+        // NOT the other one's.
+        var fx = BuildHostAndContent(hostDocs: 2, contentDocs: 3);
+
+        // Host: Alt+Shift+1 activates host doc #0; a bare Alt+1 does not match host's binding.
+        var hostAlt = KeyDown(Key.D1, KeyModifiers.Alt, fx.Host);
+        fx.Host.RaiseEvent(hostAlt);
+        Assert.False(hostAlt.Handled);
+
+        var hostAltShift = KeyDown(Key.D1, KeyModifiers.Alt | KeyModifiers.Shift, fx.Host);
+        fx.Host.RaiseEvent(hostAltShift);
+        Assert.True(hostAltShift.Handled);
+        Assert.Same(fx.HostDocs[0], fx.Factory.LastActive);
+
+        // Content: Alt+2 activates content doc #1; a bare Alt+Shift+2 does not match content's binding.
+        var contentAltShift = KeyDown(Key.D2, KeyModifiers.Alt | KeyModifiers.Shift, fx.Content);
+        fx.Content.RaiseEvent(contentAltShift);
+        // Alt+Shift+2 does not match content's Alt-only binding; content pipeline leaves it unhandled.
+        Assert.False(contentAltShift.Handled);
+
+        var contentAlt = KeyDown(Key.D2, KeyModifiers.Alt, fx.Content);
+        fx.Content.RaiseEvent(contentAlt);
+        Assert.True(contentAlt.Handled);
+        Assert.Same(fx.ContentDocs[1], fx.Factory.LastActive);
+    }
+
+    [AvaloniaFact]
+    public void Pipeline_FallsBackToRootBindings_WhenOwnControlHasNone()
+    {
+        // A floating window's inner DockControl (or any auto-wired control) with no own bindings
+        // inherits the controller root's binding set — the existing floating-window inheritance
+        // (design §8.6) is preserved by the new per-DockControl resolution's root fallback.
+        var factory = new RecordingFactory();
+        var (root, _, _) = BuildDock_Full(factory, 2, "root");
+        DockTabSwitch.SetBindings(root, new DockTabSwitchBindings
+        {
+            new DockTabSwitchGestures { Modifiers = KeyModifiers.Control | KeyModifiers.Shift, Keys = DockTabSwitchKeys.Digits },
+        });
+        DockTabSwitch.SetEnabled(root, true);
+        var controller = DockTabSwitch.GetController(root)!;
+
+        // A floating DockControl bound to the same factory — no bindings of its own — inherits
+        // the root's Ctrl+Shift+Digits gesture set.
+        var (floating, floatDocs, _) = BuildDock_Full(factory, 3, "float");
+        Assert.True(controller.IsAttachedTo(floating));
+
+        var altArgs = KeyDown(Key.D2, KeyModifiers.Alt, floating);
+        floating.RaiseEvent(altArgs);
+        Assert.False(altArgs.Handled);
+
+        var ctrlShiftArgs = KeyDown(Key.D2, KeyModifiers.Control | KeyModifiers.Shift, floating);
+        floating.RaiseEvent(ctrlShiftArgs);
+        Assert.True(ctrlShiftArgs.Handled);
+        Assert.Same(floatDocs[1], factory.LastActive);
+    }
+
+    [AvaloniaFact]
+    public void AutoWire_IsWindowScoped_DoesNotCrossBindHostAndContent()
+    {
+        // Host and content share one factory (same IFactory.DockControls collection), but each has
+        // its own controller. The controllers' registry auto-wire must NOT cross-bind — the host
+        // controller must not attach a pipeline to the content DockControl (its Alt+N would then
+        // hijack numbering) and vice versa. Only each controller's own DockControl is managed by it.
+        var fx = BuildHostAndContent(hostDocs: 2, contentDocs: 3);
+
+        // Both DockControls sit in the same factory registry.
+        Assert.Contains(fx.Host, fx.Factory.DockControls.OfType<DockControl>());
+        Assert.Contains(fx.Content, fx.Factory.DockControls.OfType<DockControl>());
+
+        // Host controller owns ONLY the host DockControl.
+        Assert.True(fx.HostController.IsAttachedTo(fx.Host));
+        Assert.False(fx.HostController.IsAttachedTo(fx.Content));
+        Assert.Equal(1, fx.HostController.AttachedPipelineCount);
+
+        // Content controller owns ONLY the content DockControl.
+        Assert.True(fx.ContentController.IsAttachedTo(fx.Content));
+        Assert.False(fx.ContentController.IsAttachedTo(fx.Host));
+        Assert.Equal(1, fx.ContentController.AttachedPipelineCount);
+    }
+
+    [AvaloniaFact]
+    public void AutoWire_SharedFactory_DoesNotDoubleAttachPipelines()
+    {
+        // Both DockControls share a factory. Each controller must hold exactly ONE pipeline (its
+        // own root) — no double-attach that would produce two tunnel handlers on the same control
+        // or duplicate badge injection.
+        var fx = BuildHostAndContent(hostDocs: 2, contentDocs: 3);
+
+        Assert.Equal(1, fx.HostController.AttachedPipelineCount);
+        Assert.Equal(1, fx.ContentController.AttachedPipelineCount);
+
+        // Cross-check: neither controller holds a pipeline for the other's DockControl.
+        Assert.False(fx.HostController.IsAttachedTo(fx.Content));
+        Assert.False(fx.ContentController.IsAttachedTo(fx.Host));
+    }
+
+    [AvaloniaFact]
+    public void AltDigit_ReachesFocusedContentControl_NotOuterHost()
+    {
+        // The product topology: host wraps content in the visual tree; but with window-scoped
+        // auto-wire, the host controller does NOT attach to the content control, so raising Alt+N
+        // directly on the content DockControl is handled by ITS pipeline and activates a content
+        // tab — the host is never given a chance to hijack Alt+N.
+        var fx = BuildHostAndContent(hostDocs: 2, contentDocs: 3);
+
+        var args = KeyDown(Key.D3, KeyModifiers.Alt, fx.Content);
+        fx.Content.RaiseEvent(args);
+
+        Assert.True(args.Handled);
+        Assert.Same(fx.ContentDocs[2], fx.Factory.LastActive);
+        // The host is left untouched — no cross-attached pipeline fired first.
+        Assert.NotSame(fx.HostDocs[0], fx.Factory.LastActive);
+    }
+
+    [AvaloniaFact]
+    public void AltShiftDigit_ReachesHostControl()
+    {
+        var fx = BuildHostAndContent(hostDocs: 3, contentDocs: 3);
+
+        var args = KeyDown(Key.D2, KeyModifiers.Alt | KeyModifiers.Shift, fx.Host);
+        fx.Host.RaiseEvent(args);
+
+        Assert.True(args.Handled);
+        Assert.Same(fx.HostDocs[1], fx.Factory.LastActive);
+    }
+
+    [AvaloniaFact]
+    public void BadgeNumbering_IsPerDockControl()
+    {
+        // The host and content pipelines number their own tabs independently: index 0 of one has
+        // no relationship to index 0 of the other. Alt+Shift+1 activates the host's first tab;
+        // Alt+1 activates the content's first tab. Both use "1" as the badge label locally.
+        var fx = BuildHostAndContent(hostDocs: 2, contentDocs: 3);
+
+        var hostArgs = KeyDown(Key.D1, KeyModifiers.Alt | KeyModifiers.Shift, fx.Host);
+        fx.Host.RaiseEvent(hostArgs);
+        Assert.Same(fx.HostDocs[0], fx.Factory.LastActive);
+
+        var contentArgs = KeyDown(Key.D1, KeyModifiers.Alt, fx.Content);
+        fx.Content.RaiseEvent(contentArgs);
+        Assert.Same(fx.ContentDocs[0], fx.Factory.LastActive);
+    }
+
+    [AvaloniaFact]
+    public void NestedDockControls_BindingResolution_Headless_NoVisualTree()
+    {
+        // Deterministic no-visual-tree variant: raising the events without attaching to any window
+        // or triggering LayoutUpdated still resolves bindings from each control's own configuration
+        // and activates the correct dockable through its own pipeline (design §4.1/§4.5).
+        var fx = BuildHostAndContent(hostDocs: 3, contentDocs: 4);
+
+        // Neither DockControl is attached to a Window/TopLevel; we drive the pipeline directly via
+        // its ProcessKeyDown surface. Content controller resolves Alt from its OWN bindings.
+        var contentArgs = KeyDown(Key.D4, KeyModifiers.Alt, fx.Content);
+        fx.ContentController.ProcessKeyDown(contentArgs);
+        Assert.True(contentArgs.Handled);
+        Assert.Same(fx.ContentDocs[3], fx.Factory.LastActive);
+
+        // Host controller resolves Alt+Shift from its OWN bindings — Alt alone doesn't match.
+        var altOnHost = KeyDown(Key.D1, KeyModifiers.Alt, fx.Host);
+        fx.HostController.ProcessKeyDown(altOnHost);
+        Assert.False(altOnHost.Handled);
+
+        var altShiftOnHost = KeyDown(Key.D2, KeyModifiers.Alt | KeyModifiers.Shift, fx.Host);
+        fx.HostController.ProcessKeyDown(altShiftOnHost);
+        Assert.True(altShiftOnHost.Handled);
+        Assert.Same(fx.HostDocs[1], fx.Factory.LastActive);
+    }
+
+    private static (DockControl Dock, IDockable[] Documents, IDock Strip) BuildDock_Full(
+        RecordingFactory factory, int count, string prefix)
+    {
+        var strip = new DockDocumentDock();
+        var docs = new IDockable[count];
+        var visible = new AvaloniaList<IDockable>();
+        for (var i = 0; i < count; i++)
+        {
+            var d = new global::Dock.Model.Avalonia.Controls.Document { Id = prefix + i, Title = prefix + i, Owner = strip, Factory = factory };
+            docs[i] = d;
+            visible.Add(d);
+        }
+        strip.VisibleDockables = visible;
+        var root = new DockRootDock { Factory = factory, VisibleDockables = new AvaloniaList<IDockable> { strip } };
+        strip.Owner = root;
+        var dock = new DockControl { Factory = factory, Layout = root };
+        return (dock, docs, strip);
     }
 }
