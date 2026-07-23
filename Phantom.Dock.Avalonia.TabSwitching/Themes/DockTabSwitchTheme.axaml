@@ -30,9 +30,11 @@
             <ItemsControl.ItemTemplate>
               <DataTemplate x:CompileBindings="False">
                 <!-- Hidden by default (Opacity 0); fades in only while the activation modifier is
-                     held, driven by the context's IsVisible -> alt-held class. -->
+                     held AND that modifier chord exactly matches THIS label's gesture set (#1121).
+                     Each DockTabIndexLabel carries its own IsVisible so a tab numbered by both Alt
+                     and Alt+Shift shows only the label whose chord is currently held. -->
                 <Border Classes="alt-index-badge"
-                        Classes.alt-held="{Binding $parent[ItemsControl].DataContext.IsVisible}">
+                        Classes.alt-held="{Binding IsVisible}">
                   <TextBlock Text="{Binding Text}"
                              FontSize="10"
                              HorizontalAlignment="Center"

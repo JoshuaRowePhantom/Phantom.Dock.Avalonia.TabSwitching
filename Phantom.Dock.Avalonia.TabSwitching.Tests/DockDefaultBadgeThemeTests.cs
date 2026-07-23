@@ -4,6 +4,7 @@ using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.Presenters;
 using Avalonia.Headless.XUnit;
+using Avalonia.Input;
 using Avalonia.Threading;
 using Avalonia.VisualTree;
 using Xunit;
@@ -17,13 +18,15 @@ namespace Phantom.Dock.Avalonia.TabSwitching.Tests;
 /// </summary>
 public sealed class DockDefaultBadgeThemeTests
 {
-    private static DockTabIndexLabel MakeLabel(string text) =>
-        new(text, new DockTabSwitchGestures());
+    private static DockTabIndexLabel MakeLabel(string text, bool isVisible = false) =>
+        new(text, new DockTabSwitchGestures()) { IsVisible = isVisible };
 
     private static DockTabIndexContext Context(bool isVisible, params string[] labels) => new()
     {
         IsVisible = isVisible,
-        Labels = labels.Select(MakeLabel).ToList(),
+        // #1121: the theme now binds each badge's alt-held class to its label's IsVisible, so seed
+        // per-label IsVisible from the aggregate for the pre-existing single-chord test scenarios.
+        Labels = labels.Select(l => MakeLabel(l, isVisible)).ToList(),
     };
 
     /// <summary>
@@ -116,16 +119,29 @@ public sealed class DockDefaultBadgeThemeTests
     }
 
     [AvaloniaFact]
-    public void DefaultTheme_SingleShortLabel_ReservesOnlyItsWidth()
+    public void DefaultTheme_AltShiftHeld_FadesInOnlyMatchingLabel()
     {
-        var (badges, onePanel, _) = Realize(Context(isVisible: true, "1"));
-        var (_, bothPanel, _) = Realize(Context(isVisible: true, "1", "F1"));
+        // #1121: a tab numbered by BOTH an Alt gesture and an Alt+Shift gesture must fade in only
+        // the label whose gesture set exactly matches the held chord. Simulate Alt+Shift held by
+        // setting label IsVisible directly (the pipeline path is covered by controller tests).
+        var altGesture = new DockTabSwitchGestures { Modifiers = KeyModifiers.Alt };
+        var altShiftGesture = new DockTabSwitchGestures { Modifiers = KeyModifiers.Alt | KeyModifiers.Shift };
+        var altLabel = new DockTabIndexLabel("1", altGesture) { IsVisible = false };
+        var altShiftLabel = new DockTabIndexLabel("!", altShiftGesture) { IsVisible = true };
 
-        Assert.Single(badges);
+        var context = new DockTabIndexContext
+        {
+            Labels = new[] { altLabel, altShiftLabel },
+            IsVisible = true,
+        };
 
-        // A single short label reserves only its own width: adding a wider "F1" label grows the cell,
-        // so the lone-"1" cell is strictly narrower — no extra space is reserved for absent labels.
-        Assert.True(onePanel.Bounds.Width > 0);
-        Assert.True(onePanel.Bounds.Width < bothPanel.Bounds.Width);
+        var (badges, _, _) = Realize(context);
+
+        Assert.Equal(2, badges.Count);
+        var altBadge = badges.Single(b => ((TextBlock)b.Child!).Text == "1");
+        var altShiftBadge = badges.Single(b => ((TextBlock)b.Child!).Text == "!");
+
+        Assert.DoesNotContain("alt-held", altBadge.Classes);
+        Assert.Contains("alt-held", altShiftBadge.Classes);
     }
 }

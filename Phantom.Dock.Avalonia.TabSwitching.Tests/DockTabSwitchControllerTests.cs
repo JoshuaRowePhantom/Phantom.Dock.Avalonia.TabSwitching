@@ -1,4 +1,6 @@
+using System.Linq;
 using Avalonia.Collections;
+using Avalonia.Controls;
 using Avalonia.Headless.XUnit;
 using Avalonia.Input;
 using Avalonia.Interactivity;
@@ -160,6 +162,156 @@ public sealed class DockTabSwitchControllerTests
             Source = dock,
         });
         Assert.False(controller.AreBadgesVisible);
+    }
+
+    // --- #1121: exact modifier equality (per-chord badge visibility) -----------------------------
+
+    private static KeyEventArgs KeyEvent(RoutedEvent<KeyEventArgs> routed, Key key, KeyModifiers modifiers, object source) => new()
+    {
+        RoutedEvent = routed,
+        Key = key,
+        KeyModifiers = modifiers,
+        Source = source,
+    };
+
+    private static void HoldModifiers(DockTabSwitchController controller, DockControl source, params Key[] modifierKeys)
+    {
+        var mods = KeyModifiers.None;
+        foreach (var k in modifierKeys)
+        {
+            mods |= ModifierForTest(k);
+            controller.ProcessKeyDown(KeyEvent(InputElement.KeyDownEvent, k, mods, source));
+        }
+    }
+
+    private static void ReleaseModifier(DockTabSwitchController controller, DockControl source, Key modifierKey, KeyModifiers remaining)
+    {
+        controller.ProcessKeyUp(KeyEvent(InputElement.KeyUpEvent, modifierKey, remaining, source));
+    }
+
+    private static KeyModifiers ModifierForTest(Key key) => key switch
+    {
+        Key.LeftAlt or Key.RightAlt => KeyModifiers.Alt,
+        Key.LeftShift or Key.RightShift => KeyModifiers.Shift,
+        Key.LeftCtrl or Key.RightCtrl => KeyModifiers.Control,
+        Key.LWin or Key.RWin => KeyModifiers.Meta,
+        _ => KeyModifiers.None,
+    };
+
+    [AvaloniaFact]
+    public void AltOnlyHeld_ShowsAltIndicesOnly()
+    {
+        // Only the default Alt binding is configured. Holding Alt alone turns on the aggregate
+        // and marks the Alt-labeled indices as visible.
+        var (dock, _, _, _) = BuildDock(3);
+        var controller = DockTabSwitch.GetController(dock)!;
+
+        HoldModifiers(controller, dock, Key.LeftAlt);
+
+        Assert.True(controller.AreBadgesVisible);
+    }
+
+    [AvaloniaFact]
+    public void AltShiftHeld_ShowsAltShiftIndices_AndHidesAltIndices()
+    {
+        // With BOTH an Alt binding and an Alt+Shift binding on the same control, holding Alt+Shift
+        // must NOT light the Alt-only labels (the #1121 regression). Aggregate stays true because
+        // the Alt+Shift binding matches exactly; per-label visibility asserted below.
+        var (dock, _, documents, _) = BuildDock(3);
+        DockTabSwitch.SetBindings(dock, new DockTabSwitchBindings
+        {
+            new DockTabSwitchGestures { Modifiers = KeyModifiers.Alt, Keys = DockTabSwitchKeys.Digits },
+            new DockTabSwitchGestures { Modifiers = KeyModifiers.Alt | KeyModifiers.Shift, Keys = DockTabSwitchKeys.Digits },
+        });
+        var controller = DockTabSwitch.GetController(dock)!;
+
+        HoldModifiers(controller, dock, Key.LeftAlt, Key.LeftShift);
+
+        Assert.True(controller.AreBadgesVisible);
+
+        // Force label materialization for the first document without a visual tree, then re-run the
+        // per-label visibility pass with the exact held chord.
+        var container = new ContentControl { DataContext = documents[0] };
+        controller.PrepareContainer(container);
+
+        var context = DockTabSwitch.GetIndexContext(container)!;
+        Assert.Equal(2, context.Labels.Count);
+        var altLabel = context.Labels.Single(l => l.GestureSet.Modifiers == KeyModifiers.Alt);
+        var altShiftLabel = context.Labels.Single(l => l.GestureSet.Modifiers == (KeyModifiers.Alt | KeyModifiers.Shift));
+
+        Assert.False(altLabel.IsVisible);
+        Assert.True(altShiftLabel.IsVisible);
+    }
+
+    [AvaloniaFact]
+    public void AltControlHeld_ShowsNoIndices_WhenNoMatchingChord()
+    {
+        // Alt+Control is a superset of Alt but is not itself a configured chord ⇒ no badges show.
+        var (dock, _, _, _) = BuildDock(3);
+        var controller = DockTabSwitch.GetController(dock)!;
+
+        HoldModifiers(controller, dock, Key.LeftAlt, Key.LeftCtrl);
+
+        Assert.False(controller.AreBadgesVisible);
+    }
+
+    [AvaloniaFact]
+    public void AltHeldThenShiftAdded_SwapsVisibleIndexSetLive()
+    {
+        // Alt alone lights the Alt label; adding Shift (without releasing Alt) swaps visibility to
+        // the Alt+Shift label; releasing Shift restores the Alt-only visibility.
+        var (dock, _, documents, _) = BuildDock(3);
+        DockTabSwitch.SetBindings(dock, new DockTabSwitchBindings
+        {
+            new DockTabSwitchGestures { Modifiers = KeyModifiers.Alt, Keys = DockTabSwitchKeys.Digits },
+            new DockTabSwitchGestures { Modifiers = KeyModifiers.Alt | KeyModifiers.Shift, Keys = DockTabSwitchKeys.Digits },
+        });
+        var controller = DockTabSwitch.GetController(dock)!;
+
+        var container = new ContentControl { DataContext = documents[0] };
+        controller.PrepareContainer(container);
+
+        var context = DockTabSwitch.GetIndexContext(container)!;
+        var altLabel = context.Labels.Single(l => l.GestureSet.Modifiers == KeyModifiers.Alt);
+        var altShiftLabel = context.Labels.Single(l => l.GestureSet.Modifiers == (KeyModifiers.Alt | KeyModifiers.Shift));
+
+        // Alt only.
+        HoldModifiers(controller, dock, Key.LeftAlt);
+        Assert.True(altLabel.IsVisible);
+        Assert.False(altShiftLabel.IsVisible);
+
+        // Add Shift while still holding Alt.
+        HoldModifiers(controller, dock, Key.LeftShift);
+        Assert.False(altLabel.IsVisible);
+        Assert.True(altShiftLabel.IsVisible);
+
+        // Release Shift; Alt remains held.
+        ReleaseModifier(controller, dock, Key.LeftShift, KeyModifiers.Alt);
+        Assert.True(altLabel.IsVisible);
+        Assert.False(altShiftLabel.IsVisible);
+    }
+
+    [AvaloniaFact]
+    public void AllModifiersReleased_HidesAllIndices()
+    {
+        // Extends ModifierDown_TogglesBadgeVisibilityFlag: releasing every modifier not only clears
+        // the aggregate but drives all per-label IsVisible false.
+        var (dock, _, documents, _) = BuildDock(3);
+        var controller = DockTabSwitch.GetController(dock)!;
+
+        var container = new ContentControl { DataContext = documents[0] };
+        controller.PrepareContainer(container);
+        var context = DockTabSwitch.GetIndexContext(container)!;
+        var altLabel = context.Labels.Single(l => l.GestureSet.Modifiers == KeyModifiers.Alt);
+
+        HoldModifiers(controller, dock, Key.LeftAlt);
+        Assert.True(controller.AreBadgesVisible);
+        Assert.True(altLabel.IsVisible);
+
+        ReleaseModifier(controller, dock, Key.LeftAlt, KeyModifiers.None);
+
+        Assert.False(controller.AreBadgesVisible);
+        Assert.False(altLabel.IsVisible);
     }
 
     [AvaloniaFact]

@@ -347,35 +347,51 @@ public sealed class DockTabSwitchController : IDisposable
 
     private void RefreshBadgeVisibility()
     {
-        // Badges are visible if any pipeline's own effective gesture set matches the currently
-        // held modifiers (each pipeline may resolve a different set from its own DockControl).
+        // #1121: exact modifier equality. Each chord shows ONLY its own gesture set's indices —
+        // Alt+Shift no longer lights up the Alt-only labels via a subset (HasFlag-style) match.
+        // The aggregate `AreBadgesVisible` is true iff SOME configured binding's modifiers exactly
+        // equal the currently held modifiers.
         var visible = false;
-        foreach (var pipeline in _pipelines.Values)
+        if (_heldModifiers != KeyModifiers.None)
         {
-            foreach (var binding in GetEffectiveBindings(pipeline.DockControl))
+            foreach (var pipeline in _pipelines.Values)
             {
-                var required = binding.Modifiers;
-                if (required != KeyModifiers.None && (_heldModifiers & required) == required)
+                foreach (var binding in GetEffectiveBindings(pipeline.DockControl))
                 {
-                    visible = true;
+                    if (binding.Modifiers != KeyModifiers.None && binding.Modifiers == _heldModifiers)
+                    {
+                        visible = true;
+                        break;
+                    }
+                }
+
+                if (visible)
+                {
                     break;
                 }
-            }
-
-            if (visible)
-            {
-                break;
             }
         }
 
         AreBadgesVisible = visible;
 
-        // Fade every realized badge across every attached DockControl in/out with the held modifier.
+        // Push held-modifier state to every pipeline so each label decides its own visibility from
+        // its own gesture set (per-label exact match — fixes the multi-label superset regression).
         foreach (var pipeline in _pipelines.Values)
         {
-            pipeline.SetBadgeVisibility(visible);
+            pipeline.RefreshLabelVisibility(_heldModifiers);
         }
     }
+
+    /// <summary>
+    /// Test/theme helper: whether <paramref name="labelModifiers"/> should currently show, given the
+    /// held modifier state. A label is visible iff its gesture set's modifiers are non-empty and
+    /// exactly equal the held modifier chord (#1121).
+    /// </summary>
+    internal static bool IsLabelVisibleFor(KeyModifiers held, KeyModifiers labelModifiers) =>
+        labelModifiers != KeyModifiers.None && held == labelModifiers;
+
+    /// <summary>Test seam: the currently held modifier chord.</summary>
+    internal KeyModifiers HeldModifiersForTest => _heldModifiers;
 
     private static KeyModifiers ModifierFor(Key key) => key switch
     {
@@ -460,12 +476,29 @@ public sealed class DockTabSwitchController : IDisposable
             _dockControl.RemoveHandler(InputElement.KeyUpEvent, OnKeyUp);
         }
 
-        /// <summary>Fades every realized badge on this control in/out with the shared held modifier.</summary>
-        public void SetBadgeVisibility(bool visible)
+        /// <summary>
+        /// Recomputes per-label visibility from the currently held modifier chord (#1121). Each label
+        /// is visible iff its gesture set's modifiers exactly equal <paramref name="held"/>, so a tab
+        /// numbered by both Alt and Alt+Shift shows only the label whose chord is held. The
+        /// context-level aggregate <see cref="DockTabIndexContext.IsVisible"/> is set to "any label
+        /// visible on this container" for consumers that only care about the on/off aggregate.
+        /// </summary>
+        public void RefreshLabelVisibility(KeyModifiers held)
         {
             foreach (var context in _containers.Values)
             {
-                context.IsVisible = visible;
+                var anyVisible = false;
+                foreach (var label in context.Labels)
+                {
+                    var labelVisible = IsLabelVisibleFor(held, label.GestureSet.Modifiers);
+                    label.IsVisible = labelVisible;
+                    if (labelVisible)
+                    {
+                        anyVisible = true;
+                    }
+                }
+
+                context.IsVisible = anyVisible;
             }
         }
 
@@ -629,7 +662,23 @@ public sealed class DockTabSwitchController : IDisposable
             }
 
             context.Index = primaryIndex;
-            context.IsVisible = _owner.AreBadgesVisible;
+
+            // Seed per-label visibility from current held-modifier state (#1121). Also update the
+            // aggregate context.IsVisible to "any label visible" so single-boolean consumers
+            // (and tests reading AreBadgesVisible) still see the right value.
+            var held = _owner._heldModifiers;
+            var anyVisible = false;
+            foreach (var label in context.Labels)
+            {
+                var labelVisible = IsLabelVisibleFor(held, label.GestureSet.Modifiers);
+                label.IsVisible = labelVisible;
+                if (labelVisible)
+                {
+                    anyVisible = true;
+                }
+            }
+
+            context.IsVisible = anyVisible;
         }
 
         /// <summary>
