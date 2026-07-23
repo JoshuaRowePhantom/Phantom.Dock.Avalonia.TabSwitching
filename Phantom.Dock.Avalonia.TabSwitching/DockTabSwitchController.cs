@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Collections.Specialized;
 using System.Linq;
+using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Interactivity;
@@ -42,6 +43,12 @@ public sealed class DockTabSwitchController : IDisposable
     private bool _disposed;
     private KeyModifiers _heldModifiers;
 
+    // #1124: top-level sourcing. When DockTabSwitch.InstallOnTopLevel is true on the root
+    // DockControl, the controller installs its tunnel key handlers on the hosting TopLevel
+    // instead of on the DockControl itself, and re-binds on visual-tree attach/detach.
+    private bool _sourcedFromTopLevel;
+    private TopLevel? _boundTopLevel;
+
     public DockTabSwitchController(DockControl dockControl)
     {
         DockControl = dockControl ?? throw new ArgumentNullException(nameof(dockControl));
@@ -73,6 +80,18 @@ public sealed class DockTabSwitchController : IDisposable
         }
 
         _attached = true;
+
+        // #1124: if the DockControl declared InstallOnTopLevel, source key events from the
+        // hosting TopLevel and gate handling on effective visibility. Per-pipeline in-control
+        // AddHandler calls are suppressed via _sourcedFromTopLevel so exactly one ProcessKey*
+        // runs per physical key event.
+        _sourcedFromTopLevel = DockTabSwitch.GetInstallOnTopLevel(DockControl);
+        if (_sourcedFromTopLevel)
+        {
+            DockControl.AttachedToVisualTree += OnRootAttachedToVisualTree;
+            DockControl.DetachedFromVisualTree += OnRootDetachedFromVisualTree;
+            RebindTopLevel(TopLevel.GetTopLevel(DockControl));
+        }
 
         _rootPipeline = AttachPipeline(DockControl);
         // Reclaim ownership: if any other controller had auto-attached to this controller's root
@@ -138,6 +157,15 @@ public sealed class DockTabSwitchController : IDisposable
         _heldModifiers = KeyModifiers.None;
         AreBadgesVisible = false;
 
+        // #1124: unbind top-level source, if any.
+        if (_sourcedFromTopLevel)
+        {
+            DockControl.AttachedToVisualTree -= OnRootAttachedToVisualTree;
+            DockControl.DetachedFromVisualTree -= OnRootDetachedFromVisualTree;
+            RebindTopLevel(null);
+            _sourcedFromTopLevel = false;
+        }
+
         UnsubscribeFromRegistry();
 
         foreach (var pipeline in _pipelines.Values.ToList())
@@ -158,6 +186,70 @@ public sealed class DockTabSwitchController : IDisposable
 
         Detach();
         _disposed = true;
+    }
+
+    // --- #1124: top-level sourcing ---------------------------------------------------------------
+
+    /// <summary>Test hook: whether the controller has bound its tunnel handlers to a <c>TopLevel</c>.</summary>
+    internal TopLevel? BoundTopLevelForTest => _boundTopLevel;
+
+    /// <summary>Test hook: whether the root pipeline suppressed its own in-control key handlers (#1124).</summary>
+    internal bool SourcedFromTopLevelForTest => _sourcedFromTopLevel;
+
+    /// <summary>Test hook (#1124): whether the root pipeline skipped its in-control AddHandler calls.</summary>
+    internal bool RootPipelineSuppressedInControlHandlersForTest =>
+        _rootPipeline?.SuppressedInControlHandlersForTest ?? false;
+
+    private void OnRootAttachedToVisualTree(object? sender, VisualTreeAttachmentEventArgs e) =>
+        RebindTopLevel(TopLevel.GetTopLevel(DockControl));
+
+    private void OnRootDetachedFromVisualTree(object? sender, VisualTreeAttachmentEventArgs e) =>
+        RebindTopLevel(null);
+
+    private void RebindTopLevel(TopLevel? newTopLevel)
+    {
+        if (ReferenceEquals(_boundTopLevel, newTopLevel))
+        {
+            return;
+        }
+
+        if (_boundTopLevel is not null)
+        {
+            _boundTopLevel.RemoveHandler(InputElement.KeyDownEvent, OnTopLevelKeyDown);
+            _boundTopLevel.RemoveHandler(InputElement.KeyUpEvent, OnTopLevelKeyUp);
+        }
+
+        _boundTopLevel = newTopLevel;
+
+        if (_boundTopLevel is not null)
+        {
+            // Tunnel: see the gesture before a focused editor/child swallows it (#1124).
+            _boundTopLevel.AddHandler(InputElement.KeyDownEvent, OnTopLevelKeyDown, RoutingStrategies.Tunnel);
+            _boundTopLevel.AddHandler(InputElement.KeyUpEvent, OnTopLevelKeyUp, RoutingStrategies.Tunnel);
+        }
+    }
+
+    private void OnTopLevelKeyDown(object? sender, KeyEventArgs e)
+    {
+        // Effective-visibility gate (#1124): a transitively-invisible target must not handle the
+        // chord — the event passes through so another effectively-visible target (or a focused
+        // child) can handle it.
+        if (!DockControl.IsEffectivelyVisible)
+        {
+            return;
+        }
+
+        _rootPipeline?.ProcessKeyDown(e);
+    }
+
+    private void OnTopLevelKeyUp(object? sender, KeyEventArgs e)
+    {
+        if (!DockControl.IsEffectivelyVisible)
+        {
+            return;
+        }
+
+        _rootPipeline?.ProcessKeyUp(e);
     }
 
     // --- Floating-window attachment via IFactory.DockControls (design §8.6) -----------------------
@@ -418,6 +510,7 @@ public sealed class DockTabSwitchController : IDisposable
         private readonly HashSet<DocumentTabStrip> _hookedStrips = new();
 
         private bool _attached;
+        private bool _suppressedInControlHandlers;
 
         public Pipeline(DockTabSwitchController owner, DockControl dockControl)
         {
@@ -428,6 +521,9 @@ public sealed class DockTabSwitchController : IDisposable
         /// <summary>The <see cref="DockControl"/> this pipeline is attached to.</summary>
         public DockControl DockControl => _dockControl;
 
+        /// <summary>Test hook (#1124): whether Attach skipped installing the in-control tunnel handlers.</summary>
+        public bool SuppressedInControlHandlersForTest => _suppressedInControlHandlers;
+
         public void Attach()
         {
             if (_attached)
@@ -437,10 +533,22 @@ public sealed class DockTabSwitchController : IDisposable
 
             _attached = true;
 
-            // Tunnel so the DockControl sees the gesture before a focused editor/child swallows it — the
-            // same routing strategy Dock uses for its own document selector.
-            _dockControl.AddHandler(InputElement.KeyDownEvent, OnKeyDown, RoutingStrategies.Tunnel);
-            _dockControl.AddHandler(InputElement.KeyUpEvent, OnKeyUp, RoutingStrategies.Tunnel);
+            // #1124: when the owner is top-level-sourced AND this pipeline is the root pipeline
+            // (i.e. this pipeline's DockControl is the opted-in DockControl), suppress the
+            // in-control tunnel AddHandler calls — the TopLevel is now the sole source, so
+            // ProcessKeyDown / ProcessKeyUp must run exactly once per physical key event.
+            var suppressInControlHandlers =
+                _owner._sourcedFromTopLevel && ReferenceEquals(_dockControl, _owner.DockControl);
+
+            if (!suppressInControlHandlers)
+            {
+                // Tunnel so the DockControl sees the gesture before a focused editor/child swallows it — the
+                // same routing strategy Dock uses for its own document selector.
+                _dockControl.AddHandler(InputElement.KeyDownEvent, OnKeyDown, RoutingStrategies.Tunnel);
+                _dockControl.AddHandler(InputElement.KeyUpEvent, OnKeyUp, RoutingStrategies.Tunnel);
+            }
+
+            _suppressedInControlHandlers = suppressInControlHandlers;
 
             // Discover tab strips and (re)apply the per-container badge context as the layout materializes.
             _dockControl.LayoutUpdated += OnLayoutUpdated;
@@ -472,8 +580,13 @@ public sealed class DockTabSwitchController : IDisposable
 
             _containers.Clear();
 
-            _dockControl.RemoveHandler(InputElement.KeyDownEvent, OnKeyDown);
-            _dockControl.RemoveHandler(InputElement.KeyUpEvent, OnKeyUp);
+            if (!_suppressedInControlHandlers)
+            {
+                _dockControl.RemoveHandler(InputElement.KeyDownEvent, OnKeyDown);
+                _dockControl.RemoveHandler(InputElement.KeyUpEvent, OnKeyUp);
+            }
+
+            _suppressedInControlHandlers = false;
         }
 
         /// <summary>

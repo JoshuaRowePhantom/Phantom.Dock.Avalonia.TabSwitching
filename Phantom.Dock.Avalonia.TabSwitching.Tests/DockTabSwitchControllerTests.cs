@@ -604,4 +604,29 @@ public sealed class DockTabSwitchControllerTests
         var dock = new DockControl { Factory = factory, Layout = root };
         return (dock, docs, strip);
     }
+
+    // --- #1124: top-level sourcing ---------------------------------------------------------------
+
+    [AvaloniaFact]
+    public void Enabled_TopLevelSourced_SkipsInControlKeyHandlers()
+    {
+        // With InstallOnTopLevel set, Attach must not install its own KeyDown/KeyUp tunnel
+        // handlers on the DockControl — the TopLevel is the sole source.
+        var factory = new RecordingFactory();
+        var (dock, _, _) = BuildDock_Full(factory, 3, "d");
+        DockTabSwitch.SetInstallOnTopLevel(dock, true);
+        DockTabSwitch.SetEnabled(dock, true);
+
+        var controller = DockTabSwitch.GetController(dock)!;
+
+        Assert.True(controller.SourcedFromTopLevelForTest);
+        Assert.True(controller.RootPipelineSuppressedInControlHandlersForTest);
+
+        // Sanity: without a hosting TopLevel, raising the event on the DockControl itself does
+        // NOT fire the pipeline — the in-control handlers were suppressed.
+        var args = KeyDown(Key.D1, KeyModifiers.Alt, dock);
+        dock.RaiseEvent(args);
+        Assert.False(args.Handled);
+        Assert.Null(factory.LastActive);
+    }
 }

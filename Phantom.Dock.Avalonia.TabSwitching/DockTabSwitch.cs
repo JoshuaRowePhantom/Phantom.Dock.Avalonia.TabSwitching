@@ -28,6 +28,17 @@ public static class DockTabSwitch
         AvaloniaProperty.RegisterAttached<Control, DockTabSwitchBindings?>("Bindings", typeof(DockTabSwitch));
 
     /// <summary>
+    /// When <c>true</c> on a <c>DockControl</c>, the controller installs its tunnelling key handlers
+    /// on the DockControl's hosting <see cref="global::Avalonia.Controls.TopLevel"/> instead of on
+    /// the DockControl itself (#1124). This makes the gesture fire regardless of where keyboard
+    /// focus sits in the window; per-controller effective-visibility gating disambiguates multiple
+    /// opted-in DockControls that share one TopLevel. When <c>false</c> (default) the controller
+    /// keeps its in-control tunnel handlers unchanged.
+    /// </summary>
+    public static readonly AttachedProperty<bool> InstallOnTopLevelProperty =
+        AvaloniaProperty.RegisterAttached<Control, bool>("InstallOnTopLevel", typeof(DockTabSwitch));
+
+    /// <summary>
     /// Per-strip opt-out. Inherited and defaults <c>true</c>, so a value on the <c>DockControl</c>
     /// (or any ancestor) cascades but can be overridden lower down (the <c>ToolTip</c> precedent).
     /// </summary>
@@ -84,6 +95,12 @@ public static class DockTabSwitch
         control.SetValue(BindingsProperty, value);
 
     public static DockTabSwitchBindings? GetBindings(Control control) => control.GetValue(BindingsProperty);
+
+    public static void SetInstallOnTopLevel(Control control, bool value) =>
+        control.SetValue(InstallOnTopLevelProperty, value);
+
+    public static bool GetInstallOnTopLevel(Control control) =>
+        control.GetValue(InstallOnTopLevelProperty);
 
     public static void SetIsSwitchable(Control control, bool value) =>
         control.SetValue(IsSwitchableProperty, value);
