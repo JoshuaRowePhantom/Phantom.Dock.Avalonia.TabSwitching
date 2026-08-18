@@ -259,6 +259,13 @@ public sealed class DockTabSwitchController : IDisposable
     internal bool IsDockFocusInside() =>
         DockControl.Layout is { } layout && DockTabScopeResolver.IsFocusInsideLayout(layout);
 
+    /// <summary>
+    /// #1124/#1332: whether this controller's root <see cref="DockControl"/> is currently effectively
+    /// visible. A region whose host is hidden (a collapsed pane, a detail dock behind a hidden ancestor)
+    /// must never be a top-level chord target, so a gesture is a no-op rather than switching a hidden dock.
+    /// </summary>
+    internal bool IsEffectivelyVisible => DockControl.IsEffectivelyVisible;
+
     // --- Floating-window attachment via IFactory.DockControls (design §8.6) -----------------------
 
     /// <summary>The factory whose registry lists every main/floating <c>DockControl</c>.</summary>

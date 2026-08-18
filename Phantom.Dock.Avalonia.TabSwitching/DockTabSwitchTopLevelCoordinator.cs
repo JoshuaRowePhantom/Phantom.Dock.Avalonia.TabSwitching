@@ -21,7 +21,8 @@ namespace Phantom.Dock.Avalonia.TabSwitching;
 /// <c>DockControl.Layout</c> to the MRU head;</item>
 /// <item>updates held-modifier / badge state on every live registered controller;</item>
 /// <item>dispatches activation to exactly one controller — the focused (MRU-ordered) matching region, or
-/// the MRU-head matching region when none is focused.</item>
+/// the MRU-head matching region when none is focused; a region whose host is not effectively visible is
+/// never a target (#1124), so a chord over a hidden dock is a no-op.</item>
 /// </list>
 /// A re-templated-away region is unregistered on <c>Detach</c>/visual-tree-detach and, as a backstop, is
 /// never the focused or MRU-head live region — so it can no longer steal and no-op the chord.
@@ -200,10 +201,13 @@ internal sealed class DockTabSwitchTopLevelCoordinator
         DockTabSwitchController? firstMatch = null;
 
         // _controllers is MRU-ordered; the first focused-and-matching region wins, else the MRU-head
-        // matching region.
+        // matching region. A region whose host is not effectively visible (collapsed pane, hidden
+        // ancestor) is never a target — the chord is a no-op rather than switching a hidden dock (#1124).
         foreach (var weak in _controllers)
         {
-            if (!weak.TryGetTarget(out var controller) || !controller.MatchesActivationChord(e))
+            if (!weak.TryGetTarget(out var controller)
+                || !controller.IsEffectivelyVisible
+                || !controller.MatchesActivationChord(e))
             {
                 continue;
             }
