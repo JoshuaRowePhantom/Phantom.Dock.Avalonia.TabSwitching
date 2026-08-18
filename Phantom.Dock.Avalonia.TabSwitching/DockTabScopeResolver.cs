@@ -53,6 +53,33 @@ internal static class DockTabScopeResolver
         return OwningDock(focused);
     }
 
+    /// <summary>
+    /// Reports whether Dock focus (the focusable root's <see cref="IDock.FocusedDockable"/>, maintained
+    /// by <c>IFactory.SetFocusedDockable</c>) currently lands inside <paramref name="layout"/> — directly
+    /// or indirectly. Walks the focused dockable's <see cref="IDockable.Owner"/> chain and returns
+    /// <c>true</c> when it reaches <paramref name="layout"/>. Uses Dock's own focus field exclusively —
+    /// never Avalonia's visual <c>FocusManager</c> — so it is the authoritative signal for #1332 routing.
+    /// </summary>
+    public static bool IsFocusInsideLayout(IDock layout)
+    {
+        var root = FindFocusableRoot(layout) ?? layout;
+        var focused = root.FocusedDockable;
+
+        IDockable? current = focused;
+        var guard = 0;
+        while (current is not null && guard++ < 4096)
+        {
+            if (ReferenceEquals(current, layout))
+            {
+                return true;
+            }
+
+            current = current.Owner;
+        }
+
+        return false;
+    }
+
     private static IRootDock? FindFocusableRoot(IDock dock)
     {
         if (dock is IRootDock { IsFocusableRoot: true } focusableRoot)

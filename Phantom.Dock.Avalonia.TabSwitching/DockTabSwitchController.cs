@@ -81,10 +81,10 @@ public sealed class DockTabSwitchController : IDisposable
 
         _attached = true;
 
-        // #1124: if the DockControl declared InstallOnTopLevel, source key events from the
-        // hosting TopLevel and gate handling on effective visibility. Per-pipeline in-control
-        // AddHandler calls are suppressed via _sourcedFromTopLevel so exactly one ProcessKey*
-        // runs per physical key event.
+        // #1124/#1332: if the DockControl declared InstallOnTopLevel, source key events from the
+        // hosting TopLevel via the per-TopLevel coordinator, which routes each chord to the focused /
+        // most-recently-focused live region. Per-pipeline in-control AddHandler calls are suppressed
+        // via _sourcedFromTopLevel so exactly one ProcessActivation runs per physical key event.
         _sourcedFromTopLevel = DockTabSwitch.GetInstallOnTopLevel(DockControl);
         if (_sourcedFromTopLevel)
         {
@@ -213,44 +213,51 @@ public sealed class DockTabSwitchController : IDisposable
             return;
         }
 
+        // #1332: routing is centralized per-TopLevel. Registering/unregistering with the coordinator
+        // (rather than installing our own TopLevel handlers) is what lets a re-templated-away region
+        // drop out of routing and prevents a stale controller from stealing the chord.
         if (_boundTopLevel is not null)
         {
-            _boundTopLevel.RemoveHandler(InputElement.KeyDownEvent, OnTopLevelKeyDown);
-            _boundTopLevel.RemoveHandler(InputElement.KeyUpEvent, OnTopLevelKeyUp);
+            DockTabSwitchTopLevelCoordinator.Unregister(_boundTopLevel, this);
         }
 
         _boundTopLevel = newTopLevel;
 
         if (_boundTopLevel is not null)
         {
-            // Tunnel: see the gesture before a focused editor/child swallows it (#1124).
-            _boundTopLevel.AddHandler(InputElement.KeyDownEvent, OnTopLevelKeyDown, RoutingStrategies.Tunnel);
-            _boundTopLevel.AddHandler(InputElement.KeyUpEvent, OnTopLevelKeyUp, RoutingStrategies.Tunnel);
+            DockTabSwitchTopLevelCoordinator.Register(_boundTopLevel, this);
         }
     }
 
-    private void OnTopLevelKeyDown(object? sender, KeyEventArgs e)
+    /// <summary>
+    /// #1332: dispatches only the activation half of a chord (no modifier tracking) to this controller's
+    /// root pipeline. The coordinator tracks modifiers on every region but activates exactly one.
+    /// </summary>
+    internal void ActivateFromTopLevel(KeyEventArgs e) => _rootPipeline?.ProcessActivation(e);
+
+    /// <summary>
+    /// #1332: whether any of the controller's effective gesture sets maps <paramref name="e"/> to a tab
+    /// index — i.e. this region is a candidate target for this chord.
+    /// </summary>
+    internal bool MatchesActivationChord(KeyEventArgs e)
     {
-        // Effective-visibility gate (#1124): a transitively-invisible target must not handle the
-        // chord — the event passes through so another effectively-visible target (or a focused
-        // child) can handle it.
-        if (!DockControl.IsEffectivelyVisible)
+        foreach (var binding in GetEffectiveBindings())
         {
-            return;
+            if (binding.BuildMap().TryGetIndex(e, out _))
+            {
+                return true;
+            }
         }
 
-        _rootPipeline?.ProcessKeyDown(e);
+        return false;
     }
 
-    private void OnTopLevelKeyUp(object? sender, KeyEventArgs e)
-    {
-        if (!DockControl.IsEffectivelyVisible)
-        {
-            return;
-        }
-
-        _rootPipeline?.ProcessKeyUp(e);
-    }
+    /// <summary>
+    /// #1332: whether Dock focus is currently inside this controller's <c>DockControl.Layout</c> (directly
+    /// or indirectly), read via Dock's own focus field — never Avalonia's visual <c>FocusManager</c>.
+    /// </summary>
+    internal bool IsDockFocusInside() =>
+        DockControl.Layout is { } layout && DockTabScopeResolver.IsFocusInsideLayout(layout);
 
     // --- Floating-window attachment via IFactory.DockControls (design §8.6) -----------------------
 
@@ -802,7 +809,17 @@ public sealed class DockTabSwitchController : IDisposable
         public void ProcessKeyDown(KeyEventArgs e)
         {
             _owner.UpdateModifierState(e.Key, pressed: true);
+            ProcessActivation(e);
+        }
 
+        /// <summary>
+        /// The activation half of <see cref="ProcessKeyDown"/> (no modifier tracking, #1332): tries each
+        /// configured gesture set and, on the first exact match, activates the indexed dockable and marks
+        /// the event handled. The coordinator calls this on exactly one region while tracking modifiers
+        /// on all of them.
+        /// </summary>
+        public void ProcessActivation(KeyEventArgs e)
+        {
             foreach (var binding in _owner.GetEffectiveBindings(_dockControl))
             {
                 var map = binding.BuildMap();

@@ -16,10 +16,11 @@ using Xunit;
 namespace Phantom.Dock.Avalonia.TabSwitching.Tests;
 
 /// <summary>
-/// Covers the #1124 top-level-sourcing + effective-visibility-gate mechanism: a DockControl that
-/// opts into <see cref="DockTabSwitch.InstallOnTopLevelProperty"/> installs its tunnel handlers on
-/// <see cref="TopLevel.GetTopLevel"/> so gestures fire regardless of keyboard focus, and only handles
-/// while the target DockControl is <see cref="Visual.IsEffectivelyVisible"/>.
+/// Covers top-level-sourced tab-switching: a DockControl that opts into
+/// <see cref="DockTabSwitch.InstallOnTopLevelProperty"/> installs (via the per-<see cref="TopLevel"/>
+/// <see cref="DockTabSwitchTopLevelCoordinator"/>) tunnel handlers on <see cref="TopLevel.GetTopLevel"/>
+/// so gestures fire regardless of keyboard focus, and each chord is routed to the Dock-focused /
+/// most-recently-focused live dock region for that hotkey set (#1332) — never by effective visibility.
 /// </summary>
 public sealed class DockTabSwitchTopLevelTests
 {
@@ -121,79 +122,131 @@ public sealed class DockTabSwitchTopLevelTests
         Assert.Same(strip, factory.LastFocused!.Strip);
     }
 
-    [AvaloniaFact]
-    public void TopLevel_TargetTransitivelyInvisible_DoesNotHandleGesture()
+    private static void SetDockFocus(IDock strip, IDockable? focused)
     {
-        var (dock, factory, _, _) = BuildDock(3);
-        DockTabSwitch.SetInstallOnTopLevel(dock, true);
-        DockTabSwitch.SetEnabled(dock, true);
-
-        var container = new StackPanel { Children = { dock } };
-        var window = new Window { Content = container };
-        window.Show();
-        Pump();
-
-        // Ancestor collapsed → the target's IsEffectivelyVisible is false, event unhandled.
-        container.IsVisible = false;
-        Pump();
-        Assert.False(dock.IsEffectivelyVisible);
-
-        var args = KeyDown(Key.D1, KeyModifiers.Alt, window);
-        window.RaiseEvent(args);
-
-        Assert.False(args.Handled);
-        Assert.Null(factory.LastActive);
+        // Simulate Dock focus by setting the focusable root's FocusedDockable directly — the same field
+        // IFactory.SetFocusedDockable maintains and that DockTabScopeResolver reads.
+        var root = strip.Owner as IDock ?? strip;
+        root.FocusedDockable = focused;
     }
 
     [AvaloniaFact]
-    public void TopLevel_TargetOwnIsVisibleButAncestorHidden_DoesNotActivate()
+    public void TopLevel_ChordWithFocusInOneDockRegion_RoutesToFocusedRegion()
     {
-        var (dock, factory, _, _) = BuildDock(3);
-        DockTabSwitch.SetInstallOnTopLevel(dock, true);
-        DockTabSwitch.SetEnabled(dock, true);
-
-        var container = new StackPanel { Children = { dock } };
-        var window = new Window { Content = container };
-        window.Show();
-        Pump();
-
-        // The DockControl's own IsVisible stays true; the ancestor is the one hidden.
-        container.IsVisible = false;
-        Pump();
-        Assert.True(dock.IsVisible);
-        Assert.False(dock.IsEffectivelyVisible);
-
-        window.RaiseEvent(KeyDown(Key.D1, KeyModifiers.Alt, window));
-
-        Assert.Null(factory.LastActive);
-    }
-
-    [AvaloniaFact]
-    public void TopLevel_TwoDockControlsOneTopLevel_OnlyEffectivelyVisibleOneHandles()
-    {
-        // Two opted-in DockControls with the SAME chord. Only the effectively-visible one handles.
-        var (a, factoryA, documentsA, _) = BuildDock(3, "a");
+        // #1332: two opted-in DockControls with the SAME chord, both effectively visible. Routing is by
+        // Dock focus, not visibility — the focused region handles.
+        var (a, factoryA, documentsA, stripA) = BuildDock(3, "a");
         var (b, factoryB, _, _) = BuildDock(3, "b");
         DockTabSwitch.SetInstallOnTopLevel(a, true);
         DockTabSwitch.SetInstallOnTopLevel(b, true);
         DockTabSwitch.SetEnabled(a, true);
         DockTabSwitch.SetEnabled(b, true);
 
-        var hidden = new StackPanel { Children = { b }, IsVisible = false };
         var window = new Window
         {
-            Content = new StackPanel { Children = { a, hidden } },
+            Content = new StackPanel { Children = { a, b } },
         };
         window.Show();
         Pump();
 
-        Assert.True(a.IsEffectivelyVisible);
-        Assert.False(b.IsEffectivelyVisible);
+        SetDockFocus(stripA, documentsA[0]);
 
         window.RaiseEvent(KeyDown(Key.D2, KeyModifiers.Alt, window));
 
         Assert.Same(documentsA[1], factoryA.LastActive);
         Assert.Null(factoryB.LastActive);
+    }
+
+    [AvaloniaFact]
+    public void TopLevel_ChordWithIndirectFocusInDockRegion_RoutesToThatRegion()
+    {
+        // Dock focus on a child document (not the strip) whose Owner chain climbs into region A still
+        // routes to A — the indirect-focus / #1329 intent, now first-class.
+        var (a, factoryA, documentsA, stripA) = BuildDock(3, "a");
+        var (b, factoryB, _, _) = BuildDock(3, "b");
+        DockTabSwitch.SetInstallOnTopLevel(a, true);
+        DockTabSwitch.SetInstallOnTopLevel(b, true);
+        DockTabSwitch.SetEnabled(a, true);
+        DockTabSwitch.SetEnabled(b, true);
+
+        var window = new Window
+        {
+            Content = new StackPanel { Children = { a, b } },
+        };
+        window.Show();
+        Pump();
+
+        // documentsA[2] is a child dockable; its Owner is the strip, whose Owner is A's root layout.
+        SetDockFocus(stripA, documentsA[2]);
+
+        window.RaiseEvent(KeyDown(Key.D1, KeyModifiers.Alt, window));
+
+        Assert.Same(documentsA[0], factoryA.LastActive);
+        Assert.Null(factoryB.LastActive);
+    }
+
+    [AvaloniaFact]
+    public void TopLevel_MostRecentlyFocusedRegionReTemplatedAway_ChordRoutesToNewLiveRegion()
+    {
+        // The #1332 degradation: region A was focused, then a re-template swaps focus to a new live
+        // region C. The stale A must not steal the chord — the focused live region wins.
+        var (a, factoryA, documentsA, stripA) = BuildDock(3, "a");
+        var (c, factoryC, documentsC, stripC) = BuildDock(3, "c");
+        DockTabSwitch.SetInstallOnTopLevel(a, true);
+        DockTabSwitch.SetInstallOnTopLevel(c, true);
+        DockTabSwitch.SetEnabled(a, true);
+        DockTabSwitch.SetEnabled(c, true);
+
+        var window = new Window
+        {
+            Content = new StackPanel { Children = { a, c } },
+        };
+        window.Show();
+        Pump();
+
+        // A is focused first (becomes most-recently-focused).
+        SetDockFocus(stripA, documentsA[0]);
+        window.RaiseEvent(KeyDown(Key.LeftAlt, KeyModifiers.Alt, window));
+
+        // Re-template: focus moves to the newly materialized region C.
+        SetDockFocus(stripA, null);
+        SetDockFocus(stripC, documentsC[0]);
+
+        window.RaiseEvent(KeyDown(Key.D2, KeyModifiers.Alt, window));
+
+        Assert.Same(documentsC[1], factoryC.LastActive);
+        Assert.Null(factoryA.LastActive);
+    }
+
+    [AvaloniaFact]
+    public void Controller_DetachedController_EvictedFromCoordinatorAndNeverSelected()
+    {
+        // Regression guard for the hygiene half: a Detach()-ed controller is unregistered and can never
+        // be selected, even when it was the last focused region.
+        var (a, factoryA, documentsA, stripA) = BuildDock(3, "a");
+        var (b, factoryB, documentsB, _) = BuildDock(3, "b");
+        DockTabSwitch.SetInstallOnTopLevel(a, true);
+        DockTabSwitch.SetInstallOnTopLevel(b, true);
+        DockTabSwitch.SetEnabled(a, true);
+        DockTabSwitch.SetEnabled(b, true);
+
+        var window = new Window
+        {
+            Content = new StackPanel { Children = { a, b } },
+        };
+        window.Show();
+        Pump();
+
+        SetDockFocus(stripA, documentsA[0]);
+
+        // Detach A (Enabled -> false disposes its controller and unregisters it).
+        DockTabSwitch.SetEnabled(a, false);
+        SetDockFocus(stripA, null);
+
+        window.RaiseEvent(KeyDown(Key.D2, KeyModifiers.Alt, window));
+
+        Assert.Null(factoryA.LastActive);
+        Assert.Same(documentsB[1], factoryB.LastActive);
     }
 
     [AvaloniaFact]
