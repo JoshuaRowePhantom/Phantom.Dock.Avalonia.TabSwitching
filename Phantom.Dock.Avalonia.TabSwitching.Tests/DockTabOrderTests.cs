@@ -4,6 +4,7 @@ using Dock.Model.Core;
 using DockDocument = Dock.Model.Avalonia.Controls.Document;
 using DockDocumentDock = Dock.Model.Avalonia.Controls.DocumentDock;
 using DockProportionalDock = Dock.Model.Avalonia.Controls.ProportionalDock;
+using DockProportionalDockSplitter = Dock.Model.Avalonia.Controls.ProportionalDockSplitter;
 using DockRootDock = Dock.Model.Avalonia.Controls.RootDock;
 using Xunit;
 
@@ -107,5 +108,84 @@ public sealed class DockTabOrderTests
         // Close a tab — recompute drops it, still derived straight from VisibleDockables.
         strip.VisibleDockables!.Remove(a1);
         Assert.Equal(new IDockable[] { a3, a2 }, service.Compute(root).Select(e => e.Dockable).ToArray());
+    }
+
+    [Fact]
+    public void Compute_SplitParentWithSplitter_SkipsSplitterAndYieldsContiguousOrder()
+    {
+        // #1331: a ProportionalDockSplitter sits between two DocumentDocks in the split parent's
+        // VisibleDockables. It is an IDockable but has no tab / no badge — it must not consume an ordinal.
+        var root = new DockRootDock();
+        var split = new DockProportionalDock { Owner = root };
+
+        var a1 = Doc("a1", null!);
+        var a2 = Doc("a2", null!);
+        var b1 = Doc("b1", null!);
+        var stripA = Strip(split, a1, a2);
+        var stripB = Strip(split, b1);
+        var splitter = new DockProportionalDockSplitter { Owner = split };
+
+        split.VisibleDockables = new AvaloniaList<IDockable> { stripA, splitter, stripB };
+        root.VisibleDockables = new AvaloniaList<IDockable> { split };
+
+        var order = new DockTabOrder().Compute(root);
+
+        // The splitter is skipped: a1, a2, b1 are contiguous with no gap and no splitter entry.
+        Assert.Equal(new IDockable[] { a1, a2, b1 }, order.Select(e => e.Dockable).ToArray());
+        Assert.DoesNotContain(order, e => ReferenceEquals(e.Dockable, splitter));
+    }
+
+    [Fact]
+    public void Compute_MultipleSplitters_ProducesNoGapsAcrossRegionBoundaries()
+    {
+        // Three regions separated by two splitters must number exactly 1..N with no missing ordinal.
+        var root = new DockRootDock();
+        var split = new DockProportionalDock { Owner = root };
+
+        var a1 = Doc("a1", null!);
+        var b1 = Doc("b1", null!);
+        var b2 = Doc("b2", null!);
+        var c1 = Doc("c1", null!);
+        var stripA = Strip(split, a1);
+        var stripB = Strip(split, b1, b2);
+        var stripC = Strip(split, c1);
+        var s1 = new DockProportionalDockSplitter { Owner = split };
+        var s2 = new DockProportionalDockSplitter { Owner = split };
+
+        split.VisibleDockables = new AvaloniaList<IDockable> { stripA, s1, stripB, s2, stripC };
+        root.VisibleDockables = new AvaloniaList<IDockable> { split };
+
+        var order = new DockTabOrder().Compute(root);
+
+        Assert.Equal(new IDockable[] { a1, b1, b2, c1 }, order.Select(e => e.Dockable).ToArray());
+        Assert.DoesNotContain(order, e => ReferenceEquals(e.Dockable, s1) || ReferenceEquals(e.Dockable, s2));
+    }
+
+    [Fact]
+    public void Compute_SplitParentWithSplitter_LabelAndActivationResolveSameDockableForIndex()
+    {
+        // The #1067 no-divergence invariant, extended to split layouts containing a splitter.
+        var root = new DockRootDock();
+        var split = new DockProportionalDock { Owner = root };
+
+        var a1 = Doc("a1", null!);
+        var b1 = Doc("b1", null!);
+        var stripA = Strip(split, a1);
+        var stripB = Strip(split, b1);
+        var splitter = new DockProportionalDockSplitter { Owner = split };
+
+        split.VisibleDockables = new AvaloniaList<IDockable> { stripA, splitter, stripB };
+        root.VisibleDockables = new AvaloniaList<IDockable> { split };
+
+        var service = new DockTabOrder();
+        var forLabels = service.Compute(root);
+        var forActivation = service.Compute(root);
+
+        Assert.Equal(forLabels.Count, forActivation.Count);
+        for (var i = 0; i < forLabels.Count; i++)
+        {
+            Assert.Same(forLabels[i].Dockable, forActivation[i].Dockable);
+            Assert.Same(forLabels[i].Strip, forActivation[i].Strip);
+        }
     }
 }

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using Dock.Model.Controls;
 using Dock.Model.Core;
 
 namespace Phantom.Dock.Avalonia.TabSwitching;
@@ -65,6 +66,15 @@ public sealed class DockTabOrder
                 case IDock childDock:
                     Collect(childDock, acc, isSwitchable);
                     break;
+
+                // #1311/#1331 exposure: a ProportionalDockSplitter is an IDockable that lives in the
+                // enclosing ProportionalDock's VisibleDockables but has no DocumentTabStripItem and no
+                // index badge. Cross-region (AllSwitchable) numbering descends into that parent, so
+                // counting the splitter produces a numbering gap (and a dead hotkey) at every split
+                // boundary. Recurse past it without adding an ordinal.
+                case IProportionalDockSplitter:
+                    break;
+
                 case not null when isSwitchable is null || isSwitchable(dock):
                     acc.Add(new DockTabEntry(dock, dockable));
                     break;
