@@ -24,10 +24,12 @@ public sealed class DockTabOrder
 {
     /// <summary>
     /// Computes the ordered <c>(strip, dockable)</c> list for <paramref name="scopeRoot"/> by walking
-    /// <see cref="IDock.VisibleDockables"/> in visual order and collecting each leaf dockable together
-    /// with its owning strip. Nested docks (splits) are recursed in order, so the result mirrors the
-    /// Dock structure exactly and is recomputed live on every call — a reorder or close is reflected
-    /// with no flat cache to invalidate.
+    /// <see cref="IDock.VisibleDockables"/> in visual order and collecting each <see cref="IDocument"/>
+    /// leaf together with its owning strip. Nested docks (splits) are recursed in order, so the result
+    /// mirrors the Dock structure exactly and is recomputed live on every call — a reorder or close is
+    /// reflected with no flat cache to invalidate. Numbering is restricted to <see cref="IDocument"/>
+    /// leaves — the only dockables that render a badged <c>DocumentTabStripItem</c> — so structural
+    /// siblings such as an <c>IProportionalDockSplitter</c> never consume an ordinal (#1342).
     /// </summary>
     /// <param name="scopeRoot">
     /// The ordering root resolved from a gesture set's <see cref="DockTabSwitchScope"/>
@@ -51,6 +53,12 @@ public sealed class DockTabOrder
         return result;
     }
 
+    /// <summary>
+    /// Recursively walks <paramref name="dock"/>'s <see cref="IDock.VisibleDockables"/> in visual order,
+    /// recursing into nested docks and appending only <see cref="IDocument"/> leaves — the badged type —
+    /// to <paramref name="acc"/>. Non-document dockables (splitters, tools, any future kind) are ignored
+    /// so they never consume an ordinal (#1342). The <paramref name="isSwitchable"/> opt-out is honoured.
+    /// </summary>
     private static void Collect(IDock dock, List<DockTabEntry> acc, Func<IDock, bool>? isSwitchable)
     {
         var visible = dock.VisibleDockables;
@@ -67,15 +75,13 @@ public sealed class DockTabOrder
                     Collect(childDock, acc, isSwitchable);
                     break;
 
-                // #1311/#1331 exposure: a ProportionalDockSplitter is an IDockable that lives in the
-                // enclosing ProportionalDock's VisibleDockables but has no DocumentTabStripItem and no
-                // index badge. Cross-region (AllSwitchable) numbering descends into that parent, so
-                // counting the splitter produces a numbering gap (and a dead hotkey) at every split
-                // boundary. Recurse past it without adding an ordinal.
-                case IProportionalDockSplitter:
-                    break;
-
-                case not null when isSwitchable is null || isSwitchable(dock):
+                // #1342 whitelist: only IDocument leaves render a switchable, badged DocumentTabStripItem,
+                // so only they may consume an ordinal. Any other non-IDock dockable — a
+                // ProportionalDockSplitter interleaved between split regions, an ITool, or any future
+                // dockable kind Dock adds to VisibleDockables — has no badge, and numbering it would
+                // reintroduce the per-split gap and dead hotkey. Positively selecting IDocument is robust
+                // where a splitter-specific blacklist was not.
+                case IDocument when isSwitchable is null || isSwitchable(dock):
                     acc.Add(new DockTabEntry(dock, dockable));
                     break;
             }

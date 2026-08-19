@@ -8,6 +8,8 @@ using Dock.Avalonia.Controls;
 using Dock.Model.Core;
 using DockDocument = global::Dock.Model.Avalonia.Controls.Document;
 using DockDocumentDock = global::Dock.Model.Avalonia.Controls.DocumentDock;
+using DockProportionalDock = Dock.Model.Avalonia.Controls.ProportionalDock;
+using DockProportionalDockSplitter = Dock.Model.Avalonia.Controls.ProportionalDockSplitter;
 using DockRootDock = Dock.Model.Avalonia.Controls.RootDock;
 using Xunit;
 
@@ -603,6 +605,91 @@ public sealed class DockTabSwitchControllerTests
         strip.Owner = root;
         var dock = new DockControl { Factory = factory, Layout = root };
         return (dock, docs, strip);
+    }
+
+    /// <summary>
+    /// Builds a DockControl whose layout is a two-region <see cref="DockProportionalDock"/> with an
+    /// <see cref="DockProportionalDockSplitter"/> interleaved between the strips — the production shape
+    /// (#1334) that reproduces the #1342 per-split ordinal gap. Returns the documents in visual order.
+    /// </summary>
+    private static (DockControl Dock, RecordingFactory Factory, IDockable[] Documents)
+        BuildSplitDock(int countA, int countB)
+    {
+        var factory = new RecordingFactory();
+        var stripA = new DockDocumentDock();
+        var stripB = new DockDocumentDock();
+        var documents = new IDockable[countA + countB];
+
+        var visibleA = new AvaloniaList<IDockable>();
+        for (var i = 0; i < countA; i++)
+        {
+            var d = new DockDocument { Id = "a" + i, Title = "a" + i, Owner = stripA, Factory = factory };
+            documents[i] = d;
+            visibleA.Add(d);
+        }
+
+        stripA.VisibleDockables = visibleA;
+
+        var visibleB = new AvaloniaList<IDockable>();
+        for (var i = 0; i < countB; i++)
+        {
+            var d = new DockDocument { Id = "b" + i, Title = "b" + i, Owner = stripB, Factory = factory };
+            documents[countA + i] = d;
+            visibleB.Add(d);
+        }
+
+        stripB.VisibleDockables = visibleB;
+
+        var split = new DockProportionalDock();
+        var splitter = new DockProportionalDockSplitter { Owner = split };
+        split.VisibleDockables = new AvaloniaList<IDockable> { stripA, splitter, stripB };
+        stripA.Owner = split;
+        stripB.Owner = split;
+
+        var root = new DockRootDock { Factory = factory, VisibleDockables = new AvaloniaList<IDockable> { split } };
+        split.Owner = root;
+
+        var dock = new DockControl { Factory = factory, Layout = root };
+        DockTabSwitch.SetEnabled(dock, true);
+
+        return (dock, factory, documents);
+    }
+
+    [AvaloniaFact]
+    public void RefreshLabels_TwoDocumentDocksSeparatedBySplitter_LabelsAre1Through9WithoutGap()
+    {
+        // #1342: two document docks (5 + 4 = 9 documents) separated by a ProportionalDockSplitter. The
+        // splitter must not consume an ordinal, so the rendered Alt labels read "1".."9" with no gap.
+        var (dock, _, documents) = BuildSplitDock(5, 4);
+        var controller = DockTabSwitch.GetController(dock)!;
+
+        var actual = new string?[documents.Length];
+        for (var i = 0; i < documents.Length; i++)
+        {
+            var container = new ContentControl { DataContext = documents[i] };
+            controller.PrepareContainer(container);
+            var context = DockTabSwitch.GetIndexContext(container)!;
+            actual[i] = context.Label;
+        }
+
+        Assert.Equal(new[] { "1", "2", "3", "4", "5", "6", "7", "8", "9" }, actual);
+    }
+
+    [AvaloniaFact]
+    public void Activate_IndexFollowingSplitter_ActivatesFirstTabOfSecondRegion()
+    {
+        // Regression guard for #1067: the activation index and the displayed label agree across a split.
+        // stripA has 2 documents (labels "1","2"); the first tab of stripB is label "3" ⇒ Alt+3 must
+        // activate it, with NO off-by-one from the interleaved splitter.
+        var (dock, factory, documents) = BuildSplitDock(2, 2);
+
+        var args = KeyDown(Key.D3, KeyModifiers.Alt, dock);
+        dock.RaiseEvent(args);
+
+        Assert.True(args.Handled);
+        Assert.Same(documents[2], factory.LastActive);
+        Assert.NotNull(factory.LastFocused);
+        Assert.Same(documents[2], factory.LastFocused!.Dockable);
     }
 
     // --- #1124: top-level sourcing ---------------------------------------------------------------

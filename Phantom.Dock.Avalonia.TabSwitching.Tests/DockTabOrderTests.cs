@@ -18,6 +18,15 @@ namespace Phantom.Dock.Avalonia.TabSwitching.Tests;
 /// </summary>
 public sealed class DockTabOrderTests
 {
+    /// <summary>
+    /// A minimal non-<see cref="Dock.Model.Controls.IDocument"/>, non-<see cref="IDock"/> leaf dockable.
+    /// Represents any dockable kind that renders no badged DocumentTabStripItem, used to prove the #1342
+    /// whitelist excludes everything except document leaves.
+    /// </summary>
+    private sealed class BareDockable : global::Dock.Model.Avalonia.Core.DockableBase
+    {
+    }
+
     private static DockDocument Doc(string id, IDock owner)
     {
         var document = new DockDocument { Id = id, Title = id, Owner = owner };
@@ -159,6 +168,132 @@ public sealed class DockTabOrderTests
 
         Assert.Equal(new IDockable[] { a1, b1, b2, c1 }, order.Select(e => e.Dockable).ToArray());
         Assert.DoesNotContain(order, e => ReferenceEquals(e.Dockable, s1) || ReferenceEquals(e.Dockable, s2));
+    }
+
+    [Fact]
+    public void Compute_ProportionalDockWithSplitterBetweenStrips_DoesNotConsumeOrdinalForSplitter()
+    {
+        // #1342: a ProportionalDockSplitter interleaved between two strips renders no badge, so the
+        // IDocument whitelist must not add it to the order (it consumes no ordinal).
+        var root = new DockRootDock();
+        var split = new DockProportionalDock { Owner = root };
+
+        var a1 = Doc("a1", null!);
+        var b1 = Doc("b1", null!);
+        var stripA = Strip(split, a1);
+        var stripB = Strip(split, b1);
+        var splitter = new DockProportionalDockSplitter { Owner = split };
+
+        split.VisibleDockables = new AvaloniaList<IDockable> { stripA, splitter, stripB };
+        root.VisibleDockables = new AvaloniaList<IDockable> { split };
+
+        var order = new DockTabOrder().Compute(root);
+
+        Assert.DoesNotContain(order, e => ReferenceEquals(e.Dockable, splitter));
+        Assert.Equal(new IDockable[] { a1, b1 }, order.Select(e => e.Dockable).ToArray());
+    }
+
+    [Fact]
+    public void Compute_ProportionalDockWithSplitter_YieldsContiguousIndicesAcrossRegions()
+    {
+        // The whole point of the fix: indices are contiguous 0..N across both regions with no gap at
+        // the split boundary, so Alt+<digit> labels read 1,2,3,... uninterrupted.
+        var root = new DockRootDock();
+        var split = new DockProportionalDock { Owner = root };
+
+        var a1 = Doc("a1", null!);
+        var a2 = Doc("a2", null!);
+        var b1 = Doc("b1", null!);
+        var b2 = Doc("b2", null!);
+        var stripA = Strip(split, a1, a2);
+        var stripB = Strip(split, b1, b2);
+        var splitter = new DockProportionalDockSplitter { Owner = split };
+
+        split.VisibleDockables = new AvaloniaList<IDockable> { stripA, splitter, stripB };
+        root.VisibleDockables = new AvaloniaList<IDockable> { split };
+
+        var order = new DockTabOrder().Compute(root);
+
+        Assert.Equal(new IDockable[] { a1, a2, b1, b2 }, order.Select(e => e.Dockable).ToArray());
+        // Contiguous: the positions of the second region's first tab immediately follow the first region.
+        Assert.Equal(2, order.Select(e => e.Dockable).ToList().IndexOf(b1));
+    }
+
+    [Fact]
+    public void Compute_MultipleSplittersBetweenStrips_AllSplittersSkipped()
+    {
+        // Every splitter in a multi-split layout is excluded by the whitelist, regardless of how many.
+        var root = new DockRootDock();
+        var split = new DockProportionalDock { Owner = root };
+
+        var a1 = Doc("a1", null!);
+        var b1 = Doc("b1", null!);
+        var c1 = Doc("c1", null!);
+        var stripA = Strip(split, a1);
+        var stripB = Strip(split, b1);
+        var stripC = Strip(split, c1);
+        var s1 = new DockProportionalDockSplitter { Owner = split };
+        var s2 = new DockProportionalDockSplitter { Owner = split };
+
+        split.VisibleDockables = new AvaloniaList<IDockable> { stripA, s1, stripB, s2, stripC };
+        root.VisibleDockables = new AvaloniaList<IDockable> { split };
+
+        var order = new DockTabOrder().Compute(root);
+
+        Assert.Equal(new IDockable[] { a1, b1, c1 }, order.Select(e => e.Dockable).ToArray());
+        Assert.DoesNotContain(order, e => e.Dockable is DockProportionalDockSplitter);
+    }
+
+    [Fact]
+    public void Compute_NonDocumentDockableInStrip_IsNotNumbered()
+    {
+        // Locks the whitelist: a non-IDocument leaf (a bare IDockable) in a strip renders no badge and
+        // must not consume an ordinal. Under the previous "everything that isn't an IDock" catch-all this
+        // leaf was numbered; the IDocument whitelist correctly excludes it.
+        var root = new DockRootDock();
+        var strip = new DockDocumentDock { Owner = root };
+
+        var d1 = Doc("d1", strip);
+        var tool = new BareDockable { Id = "x1", Title = "x1", Owner = strip };
+        var d2 = Doc("d2", strip);
+        d1.Owner = strip;
+        d2.Owner = strip;
+
+        strip.VisibleDockables = new AvaloniaList<IDockable> { d1, tool, d2 };
+        root.VisibleDockables = new AvaloniaList<IDockable> { strip };
+
+        var order = new DockTabOrder().Compute(root);
+
+        Assert.Equal(new IDockable[] { d1, d2 }, order.Select(e => e.Dockable).ToArray());
+        Assert.DoesNotContain(order, e => ReferenceEquals(e.Dockable, tool));
+    }
+
+    [Fact]
+    public void Compute_OnlyDocumentLeaves_AreNumberedInVisualOrder()
+    {
+        // Whitelist end-to-end: across a split containing documents, a bare (non-document) dockable and a
+        // splitter, only the IDocument leaves are numbered, and they appear in visual order.
+        var root = new DockRootDock();
+        var split = new DockProportionalDock { Owner = root };
+
+        var a1 = Doc("a1", null!);
+        var a2 = Doc("a2", null!);
+        var b1 = Doc("b1", null!);
+        var stripA = new DockDocumentDock { Owner = split };
+        var tool = new BareDockable { Id = "x1", Title = "x1", Owner = stripA };
+        a1.Owner = stripA;
+        a2.Owner = stripA;
+        stripA.VisibleDockables = new AvaloniaList<IDockable> { a1, tool, a2 };
+        var stripB = Strip(split, b1);
+        var splitter = new DockProportionalDockSplitter { Owner = split };
+
+        split.VisibleDockables = new AvaloniaList<IDockable> { stripA, splitter, stripB };
+        root.VisibleDockables = new AvaloniaList<IDockable> { split };
+
+        var order = new DockTabOrder().Compute(root);
+
+        Assert.Equal(new IDockable[] { a1, a2, b1 }, order.Select(e => e.Dockable).ToArray());
+        Assert.All(order, e => Assert.IsAssignableFrom<global::Dock.Model.Controls.IDocument>(e.Dockable));
     }
 
     [Fact]
