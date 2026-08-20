@@ -4,7 +4,10 @@ using Avalonia.Controls;
 using Avalonia.Headless.XUnit;
 using Avalonia.Input;
 using Avalonia.Interactivity;
+using Avalonia.Threading;
+using Avalonia.VisualTree;
 using Dock.Avalonia.Controls;
+using Dock.Avalonia.Themes.Fluent;
 using Dock.Model.Core;
 using DockDocument = global::Dock.Model.Avalonia.Controls.Document;
 using DockDocumentDock = global::Dock.Model.Avalonia.Controls.DocumentDock;
@@ -715,5 +718,146 @@ public sealed class DockTabSwitchControllerTests
         dock.RaiseEvent(args);
         Assert.False(args.Handled);
         Assert.Null(factory.LastActive);
+    }
+
+    // --- #1344: nested inner DockControl strip-ownership guard ------------------------------------
+
+    private sealed record NestedFixture(
+        Window Window,
+        DockControl Outer,
+        DockControl Inner,
+        DockTabSwitchController OuterController,
+        DocumentTabStrip OuterStrip,
+        DocumentTabStrip InnerStrip,
+        IDock OuterDock,
+        IDock InnerDock);
+
+    private static void Pump(DockControl dock)
+    {
+        dock.ApplyTemplate();
+        dock.UpdateLayout();
+        Dispatcher.UIThread.RunJobs();
+        dock.UpdateLayout();
+        Dispatcher.UIThread.RunJobs();
+    }
+
+    /// <summary>
+    /// #1344: builds the product's overlapping topology — an outer <see cref="DockControl"/> whose active
+    /// document's <c>Content</c> is a nested inner <see cref="DockControl"/> (its own separate
+    /// <see cref="DockRootDock"/>), mirroring a <c>WorkspacePaneDocument</c>. Both are rendered in one
+    /// window so the inner control's <see cref="DocumentTabStrip"/> is a visual descendant of the outer
+    /// control. Only the outer controller is enabled, so its root pipeline is the only one that could
+    /// (wrongly) reach into the inner strip.
+    /// </summary>
+    private static NestedFixture BuildNested(int outerDocs, int innerDocs)
+    {
+        var innerFactory = new global::Dock.Model.Avalonia.Factory();
+        var innerDock = new DockDocumentDock { Factory = innerFactory };
+        var innerDocuments = new AvaloniaList<IDockable>();
+        for (var i = 0; i < innerDocs; i++)
+        {
+            innerDocuments.Add(new DockDocument { Id = "in" + i, Title = "in" + i, Owner = innerDock, Factory = innerFactory });
+        }
+        innerDock.VisibleDockables = innerDocuments;
+        innerDock.ActiveDockable = innerDocuments.Count > 0 ? innerDocuments[0] : null;
+        var innerRoot = new DockRootDock { VisibleDockables = new AvaloniaList<IDockable> { innerDock } };
+        innerDock.Owner = innerRoot;
+        innerRoot.ActiveDockable = innerDock;
+        innerRoot.DefaultDockable = innerDock;
+        innerFactory.InitLayout(innerRoot);
+        var inner = new DockControl { Factory = innerFactory, Layout = innerRoot };
+
+        var outerFactory = new global::Dock.Model.Avalonia.Factory();
+        var outerDock = new DockDocumentDock { Factory = outerFactory };
+        var outerDocuments = new AvaloniaList<IDockable>();
+        for (var i = 0; i < outerDocs; i++)
+        {
+            var d = new DockDocument { Id = "out" + i, Title = "out" + i, Owner = outerDock, Factory = outerFactory };
+            if (i == 0)
+            {
+                d.Content = inner;
+            }
+
+            outerDocuments.Add(d);
+        }
+        outerDock.VisibleDockables = outerDocuments;
+        outerDock.ActiveDockable = outerDocuments[0];
+        var outerRoot = new DockRootDock { VisibleDockables = new AvaloniaList<IDockable> { outerDock } };
+        outerDock.Owner = outerRoot;
+        outerRoot.ActiveDockable = outerDock;
+        outerRoot.DefaultDockable = outerDock;
+        outerFactory.InitLayout(outerRoot);
+        var outer = new DockControl { Factory = outerFactory, Layout = outerRoot };
+
+        DockTabSwitch.SetEnabled(outer, true);
+        var outerController = DockTabSwitch.GetController(outer)!;
+
+        var window = new Window
+        {
+            Width = 800,
+            Height = 400,
+            Styles = { new DockFluentTheme(), new DockTabSwitchTheme() },
+            Content = outer,
+        };
+        window.Show();
+        Pump(outer);
+        Pump(inner);
+
+        var strips = outer.GetVisualDescendants().OfType<DocumentTabStrip>().ToList();
+        var outerStrip = strips.First(s => ReferenceEquals(s.DataContext, outerDock));
+        var innerStrip = strips.First(s => ReferenceEquals(s.DataContext, innerDock));
+
+        return new NestedFixture(window, outer, inner, outerController, outerStrip, innerStrip, outerDock, innerDock);
+    }
+
+    [AvaloniaFact]
+    public void DiscoverStrips_NestedInnerDockControl_DoesNotHookInnerStrips()
+    {
+        // The inner DockControl's DocumentTabStrip is a visual descendant of the outer DockControl, but
+        // its model (DataContext, walked up .Owner) terminates at the INNER root — not the outer's
+        // Layout. The outer pipeline's strip discovery must therefore skip it, so the outer controller
+        // never overwrites the inner containers' single IndexContext (the #1344 last-writer-wins race).
+        var fx = BuildNested(outerDocs: 2, innerDocs: 3);
+
+        fx.OuterController.DiscoverStrips();
+
+        Assert.False(fx.OuterController.StripBelongsToRootDockControl(fx.InnerStrip));
+        Assert.False(fx.OuterController.IsStripHooked(fx.InnerStrip));
+
+        fx.Window.Close();
+    }
+
+    [AvaloniaFact]
+    public void DiscoverStrips_OuterStrips_AreHooked()
+    {
+        // The outer DockControl's own DocumentTabStrip (its model chains up to the outer Layout) IS owned
+        // by the outer pipeline: it must be hooked and its realized containers numbered.
+        var fx = BuildNested(outerDocs: 2, innerDocs: 3);
+
+        fx.OuterController.DiscoverStrips();
+
+        Assert.True(fx.OuterController.StripBelongsToRootDockControl(fx.OuterStrip));
+        Assert.True(fx.OuterController.IsStripHooked(fx.OuterStrip));
+
+        // A realized outer container carries the outer controller's IndexContext (numbered "1"..).
+        var container = Assert.IsType<DocumentTabStripItem>(fx.OuterStrip.ContainerFromIndex(0));
+        Assert.NotNull(DockTabSwitch.GetIndexContext(container));
+
+        fx.Window.Close();
+    }
+
+    [AvaloniaFact]
+    public void StripBelongsToDockControl_UnboundStrip_ReturnsFalse()
+    {
+        // A strip whose DataContext has not yet bound to an IDockable model cannot be attributed to any
+        // DockControl, so the ownership predicate returns false and DiscoverStrips leaves it un-hooked
+        // (it is re-evaluated on the next LayoutUpdated once the model settles).
+        var (dock, _, _, _) = BuildDock(3);
+        var controller = DockTabSwitch.GetController(dock)!;
+
+        var unbound = new DocumentTabStrip();
+        Assert.Null(unbound.DataContext);
+
+        Assert.False(controller.StripBelongsToRootDockControl(unbound));
     }
 }

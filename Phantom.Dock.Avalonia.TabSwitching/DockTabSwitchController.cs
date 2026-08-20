@@ -388,6 +388,13 @@ public sealed class DockTabSwitchController : IDisposable
 
     internal void PrepareContainer(Control container) => _rootPipeline?.PrepareContainer(container);
 
+    /// <summary>#1344: exposes the root pipeline's model-level strip-ownership predicate for tests.</summary>
+    internal bool StripBelongsToRootDockControl(DocumentTabStrip strip) =>
+        _rootPipeline?.StripBelongsToDockControl(strip) ?? false;
+
+    /// <summary>#1344: whether the root pipeline has hooked <paramref name="strip"/> (test hook).</summary>
+    internal bool IsStripHooked(DocumentTabStrip strip) => _rootPipeline?.IsStripHooked(strip) ?? false;
+
     internal void ClearContainer(Control container) => _rootPipeline?.ClearContainer(container);
 
     internal IReadOnlyList<DockTabEntry> ComputeOrder(DockTabSwitchGestures binding) =>
@@ -646,6 +653,16 @@ public sealed class DockTabSwitchController : IDisposable
         {
             foreach (var strip in _dockControl.GetVisualDescendants().OfType<DocumentTabStrip>())
             {
+                // #1344: A DockControl's visual descendants include the strips of any nested inner
+                // DockControl (each WorkspacePaneDocument hosts its own). Only hook strips this
+                // pipeline actually owns — those whose model, walked up .Owner, reaches this
+                // DockControl.Layout — so the outer pipeline never reaches into a nested inner
+                // pipeline's strips (which would race for the single per-container IndexContext).
+                if (!StripBelongsToDockControl(strip))
+                {
+                    continue;
+                }
+
                 if (!_hookedStrips.Add(strip))
                 {
                     continue;
@@ -668,6 +685,8 @@ public sealed class DockTabSwitchController : IDisposable
             strip.ContainerClearing -= OnContainerClearing;
             strip.ContainerIndexChanged -= OnContainerIndexChanged;
         }
+
+        internal bool IsStripHooked(DocumentTabStrip strip) => _hookedStrips.Contains(strip);
 
         private void OnContainerPrepared(object? sender, ContainerPreparedEventArgs e)
         {
@@ -888,7 +907,43 @@ public sealed class DockTabSwitchController : IDisposable
         private Control? FindStripControl(IDock strip) =>
             _dockControl.GetVisualDescendants()
                 .OfType<DocumentTabStrip>()
+                .Where(StripBelongsToDockControl)
                 .FirstOrDefault(ts => ReferenceEquals(ts.DataContext, strip));
+
+        /// <summary>
+        /// #1344: Model-level ownership test. A <see cref="DocumentTabStrip"/> belongs to this pipeline's
+        /// <c>DockControl</c> iff its bound model (its <c>DataContext</c>, an <see cref="IDockable"/>),
+        /// walked up the <see cref="IDockable.Owner"/> chain, reaches this <c>DockControl.Layout</c>
+        /// (the pipeline's <see cref="IRootDock"/>). This is the same source of truth used by
+        /// <see cref="ComputeOrder"/> and <c>DockTabScopeResolver.OwningDock</c>, and correctly excludes
+        /// strips owned by a nested inner <c>DockControl</c> (they chain to the inner root) while a
+        /// floating window's strips are claimed by the floating <c>DockControl</c>'s own pipeline. An
+        /// unbound <c>DataContext</c>, a transient null <c>Owner</c>, or a null <c>Layout</c> returns
+        /// false; discovery is retried on <c>LayoutUpdated</c> once the model settles.
+        /// </summary>
+        internal bool StripBelongsToDockControl(DocumentTabStrip strip)
+        {
+            if (strip.DataContext is not IDockable dockable)
+            {
+                return false;
+            }
+
+            var root = _dockControl.Layout;
+            if (root is null)
+            {
+                return false;
+            }
+
+            for (IDockable? d = dockable; d is not null; d = d.Owner)
+            {
+                if (ReferenceEquals(d, root))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
 
         private static bool LabelsEqual(IReadOnlyList<DockTabIndexLabel> current, IReadOnlyList<DockTabIndexLabel> next)
         {
